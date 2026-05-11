@@ -10,8 +10,8 @@
 
 전체 팀 작업 내용은 아래 Notion 문서에서 관리한다.
 
-- [팀 작업](https://www.notion.so/4ec9276d71c58327b4aa81d003ab53c7?pvs=21)
-- [기능 타임라인](https://www.notion.so/3529276d71c580c5b5dcd29fed068d4d?pvs=21)
+- [플로우 차트 및 시스템 아키텍쳐](https://www.notion.so/4ec9276d71c58327b4aa81d003ab53c7?pvs=21)](https://doosan-rokey.slack.com/archives/C0AS7C8LKCP/p1778387524318529)
+- [피피티](https://www.notion.so/3529276d71c580c5b5dcd29fed068d4d?pvs=21)](https://doosan-rokey.slack.com/archives/C0AS7C8LKCP/p1778464674400339)
 
 ---
 
