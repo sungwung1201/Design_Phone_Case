@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <!--
+        ROBOCASE phone UI의 단일 진입 HTML입니다.
+        실제 화면 전환과 상태 관리는 app.js가 담당하고,
+        이 파일은 폰트, 스타일시트, 아이콘 라이브러리, 앱 마운트 지점만 준비합니다.
+    -->
+    <meta charset="UTF-8">
+    <!-- 모바일 키오스크/휴대폰 브라우저에서 실제 화면 폭 기준으로 UI가 맞춰지도록 설정합니다. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ROBOCASE - 커스텀 로봇 케이스</title>
+    <!-- Google Fonts 연결을 미리 열어 첫 렌더링 시 폰트 로딩 지연을 줄입니다. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Outfit:wght@700;800&display=swap" rel="stylesheet">
+    <!-- 전체 레이아웃, 컴포넌트, 캔버스/상태 화면 스타일은 style.css에 모여 있습니다. -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- app.js가 이 div에 현재 route에 맞는 View HTML을 통째로 렌더링합니다. -->
+    <div id="app">
+        <!-- 뷰 렌더링 컨테이너 -->
+    </div>
+    <!-- 버튼/상태 표시 아이콘은 Feather Icons를 사용하며, 렌더링 후 app.js의 refreshIcons()가 SVG로 치환합니다. -->
+    <script src="https://unpkg.com/feather-icons"></script>
+    <!-- 앱 상태, 화면 템플릿, API 통신, 캔버스 드로잉 로직의 본체입니다. -->
+    <script src="app.js"></script>
+</body>
+</html>
