@@ -10,7 +10,7 @@
 
 전체 팀 작업 내용은 아래 Notion 문서에서 관리한다.
 
-- [플로우 차트 및 시스템 아키텍쳐](https://www.notion.so/4ec9276d71c58327b4aa81d003ab53c7?pvs=21)](https://doosan-rokey.slack.com/archives/C0AS7C8LKCP/p1778387524318529)
+- [플로우 차트 및 시스템 아키텍쳐]    https://drive.google.com/file/d/1dxcY2GncCE7Od2wNxObTBmfOnhYIjubR/view
 - [피피티]   https://docs.google.com/presentation/d/1sPMh8QSl3j3RIDtYPVW3pot2J7m9zRz-a6_5ZFc1Pqw/edit
 
 ---
