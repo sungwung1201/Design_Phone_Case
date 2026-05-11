@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Robot Server Admin</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; font-family:"Segoe UI",sans-serif; }
+    body { background:#0f1117; color:white; overflow:hidden; }
+    .container { display:flex; height:100vh; }
+
+    /* ── SIDEBAR ── */
+    .sidebar { width:240px; background:#151922; border-right:1px solid #222938; padding:25px; flex-shrink:0; }
+    .logo { font-size:24px; font-weight:800; margin-bottom:40px; color:#4ea1ff; }
+    .menu { display:flex; flex-direction:column; gap:10px; }
+    .menu button {
+      background:#1d2330; border:none; color:#ccc; padding:13px 16px;
+      border-radius:12px; text-align:left; cursor:pointer; transition:0.2s; font-size:14px;
+    }
+    .menu button:hover { background:#2b3447; color:white; }
+    .menu button.active { background:#4ea1ff; color:#000; font-weight:700; }
+
+    /* ── MAIN ── */
+    .main { flex:1; padding:25px; overflow:auto; display:flex; flex-direction:column; gap:20px; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; }
+    .page-title { font-size:26px; font-weight:800; }
+    .server-status {
+      display:flex; align-items:center; gap:10px;
+      background:#1c2330; padding:10px 18px; border-radius:12px; font-size:14px;
+    }
+    .dot {
+      width:11px; height:11px; border-radius:50%;
+      background:#00ff88; box-shadow:0 0 8px #00ff88;
+      animation: blink 1.5s ease-in-out infinite;
+    }
+    .dot.offline { background:#ff4d67; box-shadow:0 0 8px #ff4d67; animation:none; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* ── CARDS ── */
+    .cards { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
+    .card {
+      background:#161b26; border:1px solid #242c3d;
+      border-radius:16px; padding:20px;
+    }
+    .card-title { color:#9ea7b8; font-size:13px; margin-bottom:10px; }
+    .card-value { font-size:30px; font-weight:800; }
+    .c-blue   { color:#4ea1ff; }
+    .c-green  { color:#00ff88; }
+    .c-yellow { color:#ffc14d; }
+    .c-red    { color:#ff4d67; }
+
+    /* ── TERMINALS ── */
+    .terminal-wrap { display:grid; grid-template-columns:1fr 1fr; gap:16px; flex:1; min-height:0; }
+    .terminal {
+      background:#0a0c10; border:1px solid #2a2f3d;
+      border-radius:14px; overflow:hidden; display:flex; flex-direction:column;
+    }
+    .terminal-header {
+      background:#1a1f2e; padding:10px 16px; font-size:13px;
+      color:#aaa; border-bottom:1px solid #2a2f3d;
+      display:flex; justify-content:space-between; align-items:center;
+    }
+    .terminal-header span { font-size:11px; color:#555; }
+    .terminal-body {
+      padding:14px 16px; overflow-y:auto; font-family:monospace;
+      font-size:13px; line-height:1.75; flex:1;
+      white-space:pre-wrap; word-break:break-all;
+    }
+    .log-info  { color:#00cc66; }
+    .log-warn  { color:#ffcc00; }
+    .log-error { color:#ff5c5c; }
+    .log-blue  { color:#53a8ff; }
+    .log-dim   { color:#555; }
+
+    /* ── ORDERS PANEL ── */
+    .orders-panel {
+      background:#161b26; border:1px solid #242c3d; border-radius:16px;
+      padding:18px; display:none; flex-direction:column; gap:12px;
+    }
+    .orders-panel.visible { display:flex; }
+    .order-row {
+      display:flex; align-items:center; gap:14px;
+      background:#1a1f2e; border-radius:10px; padding:12px 16px;
+      border-left:3px solid #333;
+    }
+    .order-row.waiting    { border-color:#ffc14d; }
+    .order-row.processing { border-color:#4ea1ff; }
+    .order-row.done       { border-color:#00ff88; }
+    .order-img { width:44px; height:44px; border-radius:8px; object-fit:cover; background:#fff; }
+    .order-info { flex:1; min-width:0; }
+    .order-name { font-weight:600; font-size:13px; }
+    .order-meta { color:#888; font-size:12px; margin-top:2px; }
+    .progress-wrap { display:flex; align-items:center; gap:8px; margin-top:6px; }
+    .prog-bg { flex:1; height:5px; background:#2a2f3d; border-radius:3px; overflow:hidden; }
+    .prog-fill { height:100%; border-radius:3px; transition:width .5s ease; background:#4ea1ff; }
+    .prog-fill.done { background:#00ff88; }
+    .prog-pct { font-size:11px; color:#888; min-width:28px; text-align:right; font-family:monospace; }
+    .badge {
+      font-size:11px; font-weight:600; padding:3px 8px; border-radius:99px;
+      white-space:nowrap;
+    }
+    .badge.waiting    { background:rgba(255,193,77,.15); color:#ffc14d; }
+    .badge.processing { background:rgba(78,161,255,.15); color:#4ea1ff; }
+    .badge.done       { background:rgba(0,255,136,.12); color:#00ff88; }
+    .btn-del {
+      background:transparent; border:1px solid #333; color:#888; padding:5px 10px;
+      border-radius:8px; cursor:pointer; font-size:12px; transition:0.2s;
+    }
+    .btn-del:hover { border-color:#ff4d67; color:#ff4d67; }
+    .btn-rst {
+      background:transparent; border:1px solid #333; color:#888; padding:5px 10px;
+      border-radius:8px; cursor:pointer; font-size:12px; transition:0.2s;
+    }
+    .btn-rst:hover { border-color:#4ea1ff; color:#4ea1ff; }
+
+    /* ── TOAST ── */
+    .toast {
+      position:fixed; bottom:24px; right:24px;
+      background:#1a1f2e; border:1px solid #333; border-radius:10px;
+      padding:10px 18px; font-size:13px;
+      transform:translateY(80px); opacity:0; transition:.3s; z-index:9999;
+    }
+    .toast.show { transform:translateY(0); opacity:1; }
+    .toast.ok  { border-color:#00ff88; color:#00ff88; }
+    .toast.err { border-color:#ff4d67; color:#ff4d67; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="logo">🤖 Robot Admin</div>
+    <div class="menu">
+      <button class="active" onclick="showPage('dashboard',this)">📊 Dashboard</button>
+      <button onclick="showPage('orders',this)">📦 Orders</button>
+      <button onclick="showPage('robot',this)">🦾 Robot Status</button>
+      <button onclick="showPage('logs',this)">📝 Logs</button>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- 상단 바 -->
+    <div class="topbar">
+      <div class="page-title" id="page-title">Server Monitoring Dashboard</div>
+      <div class="server-status">
+        <div class="dot" id="server-dot"></div>
+        <span id="server-label">연결 확인 중...</span>
+      </div>
+    </div>
+
+    <!-- 요약 카드 -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-title">전체 주문 수</div>
+        <div class="card-value c-blue" id="cnt-total">-</div>
+      </div>
+      <div class="card">
+        <div class="card-title">현재 상태</div>
+        <div class="card-value c-green" id="cnt-status">-</div>
+      </div>
+      <div class="card">
+        <div class="card-title">대기 중</div>
+        <div class="card-value c-yellow" id="cnt-waiting">-</div>
+      </div>
+      <div class="card">
+        <div class="card-title">완료</div>
+        <div class="card-value c-red" id="cnt-done">-</div>
+      </div>
+    </div>
+
+    <!-- 대시보드: 터미널 두 개 -->
+    <div class="terminal-wrap" id="page-dashboard">
+
+      <!-- Flask 로그 (API 요청 기록) -->
+      <div class="terminal">
+        <div class="terminal-header">
+          Flask Server
+          <span id="flask-time"></span>
+        </div>
+        <div class="terminal-body" id="flask-log">
+          <span class="log-info">* Serving Flask app 'app'</span>
+          <span class="log-info">* Debug mode: on</span>
+          <span class="log-error">WARNING: Development server — do not use in production.</span>
+          <span class="log-blue">* Running on http://127.0.0.1:5000</span>
+          <span class="log-blue">* Running on http://0.0.0.0:5000</span>
+          <span class="log-dim">Press CTRL+C to quit</span>
+
+        </div>
+      </div>
+
+      <!-- 로봇 상태 (DB 기반) -->
+      <div class="terminal">
+        <div class="terminal-header">
+          Robot Drawer
+          <span id="robot-time"></span>
+        </div>
+        <div class="terminal-body" id="robot-log">
+          <span class="log-info">[INFO] 노드 대기 중...</span>
+        </div>
+      </div>
+
+    </div>
+    <!-- =========================
+    🤖 ROBOT STATUS PAGE
+    ========================= -->
+    <div id="page-robot"
+        style="
+          display:none;
+          flex-direction:column;
+          gap:16px;
+        ">
+
+      <div class="cards">
+
+        <div class="card">
+          <div class="card-title">현재 상태</div>
+          <div class="card-value c-green"
+              id="robot-state">
+            IDLE
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">현재 Stage</div>
+          <div class="card-value c-blue"
+              id="robot-stage">
+            WAITING
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">현재 펜</div>
+          <div class="card-value c-yellow"
+              id="robot-pen">
+            NONE
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">현재 주문</div>
+          <div class="card-value c-red"
+              id="robot-order">
+            -
+          </div>
+        </div>
+
+      </div>
+
+      <div class="cards">
+
+        <div class="card">
+
+          <div class="card-title">
+            현재 좌표
+          </div>
+
+          <div style="line-height:2; margin-top:10px;">
+
+            X :
+            <span id="robot-x">0.0</span>
+
+            <br>
+
+            Y :
+            <span id="robot-y">0.0</span>
+
+            <br>
+
+            Z :
+            <span id="robot-z">0.0</span>
+
+          </div>
+
+        </div>
+
+        <div class="card">
+
+          <div class="card-title">
+            Path 진행률
+          </div>
+
+          <div class="progress-wrap"
+              style="margin-top:18px;">
+
+            <div class="prog-bg">
+
+              <div class="prog-fill"
+                  id="robot-progress-bar"
+                  style="width:0%">
+              </div>
+
+            </div>
+
+          </div>
+
+          <div style="
+            margin-top:12px;
+            color:#888;
+            font-size:13px;
+          "
+              id="robot-progress-text">
+
+            0 / 0 paths
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- =========================
+    📝 LOGS PAGE
+    ========================= -->
+    <div id="page-logs"
+        style="
+          display:none;
+          flex-direction:column;
+          gap:16px;
+        ">
+
+      <div class="terminal">
+
+        <div class="terminal-header">
+          System Logs
+        </div>
+
+        <div class="terminal-body"
+            id="system-log">
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- 주문 패널 -->
+    <div class="orders-panel" id="page-orders">
+      <div style="font-weight:700; font-size:15px; margin-bottom:4px;">📦 주문 목록</div>
+      <div id="orders-list"><div style="color:#555;text-align:center;padding:2rem;">불러오는 중...</div></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 토스트 -->
+<div class="toast" id="toast"></div>
+
+<script>
+let allOrders = [];
+let flaskLogs = [];
+let robotLogs = [];
+let currentPage = 'dashboard';
+
+// ─── 페이지 전환 ───
+function showPage(page, btn) {
+
+  currentPage = page;
+
+  document.querySelectorAll('.menu button')
+    .forEach(b => b.classList.remove('active'));
+
+  btn.classList.add('active');
+
+  document.getElementById('page-dashboard').style.display =
+    (page === 'dashboard') ? 'grid' : 'none';
+
+  document.getElementById('page-orders').style.display =
+    (page === 'orders') ? 'flex' : 'none';
+
+  document.getElementById('page-robot').style.display =
+    (page === 'robot') ? 'flex' : 'none';
+
+  document.getElementById('page-logs').style.display =
+    (page === 'logs') ? 'flex' : 'none';
+
+  const titles = {
+    dashboard: 'Server Monitoring Dashboard',
+    orders: '📦 주문 목록',
+    robot: '🤖 Robot Status',
+    logs: '📝 System Logs'
+  };
+
+  document.getElementById('page-title').textContent =
+    titles[page] || page;
+}
+
+// ─── 시간 포맷 ───
+function nowStr() {
+
+  return new Date().toLocaleTimeString(
+    'ko-KR',
+    {
+      hour:'2-digit',
+      minute:'2-digit',
+      second:'2-digit'
+    }
+  );
+}
+
+function fullTime(iso) {
+
+  return new Date(iso + 'Z')
+    .toLocaleString('ko-KR');
+}
+
+// ─── Flask 로그 추가 ───
+function addFlaskLog(msg, cls='log-dim') {
+
+  const ts = nowStr();
+
+  flaskLogs.push(
+    `<span class="${cls}">[${ts}] ${msg}</span>`
+  );
+
+  if (flaskLogs.length > 80) {
+    flaskLogs.shift();
+  }
+
+  const el = document.getElementById('flask-log');
+
+  if (!el) return;
+
+  el.innerHTML = flaskLogs.join('\n');
+
+  el.scrollTop = el.scrollHeight;
+
+  const t = document.getElementById('flask-time');
+
+  if (t) {
+    t.textContent = ts;
+  }
+}
+
+// ─── Robot 로그 추가 ───
+function addRobotLog(msg, cls='log-info') {
+
+  const ts = nowStr();
+
+  robotLogs.push(
+    `<span class="${cls}">[${ts}] ${msg}</span>`
+  );
+
+  if (robotLogs.length > 80) {
+    robotLogs.shift();
+  }
+
+  const el = document.getElementById('robot-log');
+
+  if (!el) return;
+
+  el.innerHTML = robotLogs.join('\n');
+
+  el.scrollTop = el.scrollHeight;
+
+  const t = document.getElementById('robot-time');
+
+  if (t) {
+    t.textContent = ts;
+  }
+}
+
+// ─── 주문 데이터 가져오기 ───
+async function fetchOrders() {
+
+  try {
+
+    const res = await fetch('/api/orders');
+
+    if (!res.ok) {
+      throw new Error();
+    }
+
+    allOrders = await res.json();
+
+    // 서버 상태
+    document.getElementById('server-dot').className =
+      'dot';
+
+    document.getElementById('server-label').textContent =
+      '서버 온라인';
+
+    addFlaskLog(
+      '"GET /api/orders HTTP/1.1" 200',
+      'log-dim'
+    );
+
+    // 상태 계산
+    const waiting = allOrders.filter(
+      o => o.status === 'waiting'
+    ).length;
+
+    const processing = allOrders.filter(o => {
+
+      const progress = Number(o.progress || 0);
+
+      return (
+        o.status === 'processing' &&
+        progress > 0 &&
+        progress < 100
+      );
+
+    }).length;
+
+    const done = allOrders.filter(o => {
+
+      const progress = Number(o.progress || 0);
+
+      return (
+        o.status === 'done' ||
+        progress >= 100
+      );
+
+    }).length;
+
+    document.getElementById('cnt-total').textContent =
+      allOrders.length;
+
+    document.getElementById('cnt-waiting').textContent =
+      waiting;
+
+    document.getElementById('cnt-done').textContent =
+      done;
+
+    let statusText = 'IDLE';
+    let statusColor = 'c-red';
+
+    if (processing > 0) {
+
+      statusText = 'DRAWING';
+      statusColor = 'c-green';
+
+    }
+    else if (waiting > 0) {
+
+      statusText = 'WAITING';
+      statusColor = 'c-yellow';
+
+    }
+    else if (done > 0) {
+
+      statusText = 'READY';
+      statusColor = 'c-blue';
+
+    }
+
+    document.getElementById('cnt-status').textContent =
+      statusText;
+
+    document.getElementById('cnt-status').className =
+      'card-value ' + statusColor;
+
+    renderOrders();
+
+  } catch (e) {
+
+    console.error(e);
+
+    document.getElementById('server-dot').className =
+      'dot offline';
+
+    document.getElementById('server-label').textContent =
+      '서버 연결 끊김';
+
+    addFlaskLog(
+      '서버 연결 실패',
+      'log-error'
+    );
+  }
+}
+
+// ─── 실제 ROS 로그 가져오기 ───
+async function fetchRobotLogs() {
+
+  try {
+
+    const res = await fetch('/api/robot_logs');
+
+    if (!res.ok) return;
+
+    const logs = await res.json();
+
+    const el = document.getElementById('robot-log');
+
+    if (!el) return;
+
+    el.innerHTML = logs.map(log => {
+
+      let cls = 'log-info';
+
+      if (log.level === 'warn') {
+        cls = 'log-warn';
+      }
+
+      if (log.level === 'error') {
+        cls = 'log-error';
+      }
+
+      return `
+
+<span class="${cls}">
+[${log.time}] ${log.message}
+</span>
+      `;
+
+    }).join('\n');
+
+    el.scrollTop = el.scrollHeight;
+
+    const t = document.getElementById('robot-time');
+
+    if (t) {
+      t.textContent = nowStr();
+    }
+
+  } catch (e) {
+
+    console.error(e);
+
+  }
+}
+
+// 🤖 Robot Status 가져오기
+async function fetchRobotStatus() {
+
+  try {
+
+    const res = await fetch('/api/robot_status');
+
+    if (!res.ok) return;
+
+    const data = await res.json();
+
+    // 상태
+    document.getElementById('robot-state').textContent =
+      data.state || 'IDLE';
+
+    // stage
+    document.getElementById('robot-stage').textContent =
+      data.stage || 'WAITING';
+
+    // 펜
+    document.getElementById('robot-pen').textContent =
+      data.pen || 'NONE';
+
+    // 주문번호
+    document.getElementById('robot-order').textContent =
+      data.orderId || '-';
+
+    // 좌표
+    document.getElementById('robot-x').textContent =
+      Number(data.x || 0).toFixed(2);
+
+    document.getElementById('robot-y').textContent =
+      Number(data.y || 0).toFixed(2);
+
+    document.getElementById('robot-z').textContent =
+      Number(data.z || 0).toFixed(2);
+
+    // path 진행률
+    const current = data.currentPath || 0;
+    const total = data.totalPath || 0;
+
+    let pct = 0;
+
+    if (total > 0) {
+      pct = (current / total) * 100;
+    }
+
+    document.getElementById('robot-progress-bar')
+      .style.width = `${pct}%`;
+
+    document.getElementById('robot-progress-text')
+      .textContent = `${current} / ${total} paths`;
+
+  } catch (e) {
+
+    console.error(e);
+
+  }
+}
+
+// ─── 주문 패널 렌더링 ───
+function renderOrders() {
+
+  const el = document.getElementById('orders-list');
+
+  if (!el) return;
+
+  if (!allOrders.length) {
+
+    el.innerHTML = `
+<div style="
+  color:#555;
+  text-align:center;
+  padding:2rem;
+">
+주문 없음
+</div>
+    `;
+
+    return;
+  }
+
+  el.innerHTML = allOrders.map(o => {
+
+    const isDone = o.status === 'done';
+
+    const label = {
+      waiting:'대기 중',
+      processing:'그리는 중',
+      done:'완료'
+    }[o.status] || o.status;
+
+    const eta = o.estimatedTime > 0
+      ? `⏱ ${
+          Math.floor(o.estimatedTime/60) > 0
+          ? Math.floor(o.estimatedTime/60)+'분 '
+          : ''
+        }${o.estimatedTime%60}초 남음`
+      : (isDone ? '완료' : '계산 중...');
+
+    const img = o.image_path
+      ? `<img class="order-img"
+              src="/uploads/${o.image_path}"
+              onerror="this.src='/static/placeholder.png'; this.onerror=null;">`
+      : `<div class="order-img"
+              style="
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                color:#555;
+              ">
+          🖼️
+        </div>`;
+
+    return `
+<div class="order-row ${o.status}">
+
+  ${img}
+
+  <div class="order-info">
+
+    <div class="order-name">
+      #${o.id} · ${o.model || '(기종 없음)'}
+    </div>
+
+    <div class="order-meta">
+      ${o.caseType||''}
+      ·
+      ${o.caseColor||''}
+      ·
+      ₩${(o.totalPrice||0).toLocaleString()}
+      ·
+      ${fullTime(o.createdAt)}
+    </div>
+
+    <div class="progress-wrap">
+
+      <div class="prog-bg">
+        <div class="prog-fill ${isDone?'done':''}"
+             style="width:${o.progress||0}%">
+        </div>
+      </div>
+
+      <span class="prog-pct">
+        ${o.progress||0}%
+      </span>
+
+      <span style="
+        font-size:11px;
+        color:#666;
+        margin-left:4px;
+      ">
+        ${eta}
+      </span>
+
+    </div>
+  </div>
+
+  <span class="badge ${o.status}">
+    ${label}
+  </span>
+
+  <button class="btn-rst"
+          onclick="resetOrder(${o.id})">
+    🔄
+  </button>
+
+  <button class="btn-del"
+          onclick="deleteOrder(${o.id})">
+    🗑
+  </button>
+
+</div>
+    `;
+
+  }).join('');
+}
+
+// ─── 주문 초기화 ───
+async function resetOrder(id) {
+
+  if (!confirm(
+    `주문 #${id}를 대기 상태로 초기화하시겠습니까?`
+  )) {
+    return;
+  }
+
+  await fetch(
+    `/api/orders/${id}/reset`,
+    { method:'PATCH' }
+  );
+
+  addFlaskLog(
+    `"PATCH /api/orders/${id}/reset HTTP/1.1" 200`,
+    'log-info'
+  );
+
+  showToast(
+    `주문 #${id} 초기화 완료`,
+    'ok'
+  );
+
+  fetchOrders();
+}
+
+// ─── 주문 삭제 ───
+async function deleteOrder(id) {
+
+  if (!confirm(
+    `주문 #${id}를 삭제하시겠습니까? (복구 불가)`
+  )) {
+    return;
+  }
+
+  await fetch(
+    `/api/orders/${id}`,
+    { method:'DELETE' }
+  );
+
+  addFlaskLog(
+    `"DELETE /api/orders/${id} HTTP/1.1" 200`,
+    'log-warn'
+  );
+
+  showToast(
+    `주문 #${id} 삭제 완료`,
+    'ok'
+  );
+
+  fetchOrders();
+}
+
+// ─── 토스트 ───
+function showToast(msg, type='') {
+
+  const el = document.getElementById('toast');
+
+  if (!el) return;
+
+  el.textContent = msg;
+
+  el.className = `toast show ${type}`;
+
+  setTimeout(() => {
+    el.classList.remove('show');
+  }, 3000);
+}
+
+// ─── 초기 실행 ───
+window.onload = () => {
+
+  fetchOrders();
+  fetchRobotLogs();
+  fetchRobotStatus();
+
+  setInterval(fetchOrders, 2000);
+
+  setInterval(fetchRobotLogs, 1000);
+
+  setInterval(fetchRobotStatus, 500);
+
+  setInterval(() => {
+
+    const el = document.getElementById('flask-time');
+
+    if (el) {
+      el.textContent = nowStr();
+    }
+
+  }, 1000);
+
+};
+
+</script>
+</body>
+</html>
