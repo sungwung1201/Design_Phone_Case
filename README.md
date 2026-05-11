@@ -8,7 +8,7 @@
 
 ## 팀 작업 문서
 
-전체 팀 작업 내용은 아래 Notion 문서에서 관리한다.
+전체 자세한 팀 작업 내용은 아래 문서에서 관리한다.
 
 - [플로우 차트 및 시스템 아키텍쳐]    https://drive.google.com/file/d/1dxcY2GncCE7Od2wNxObTBmfOnhYIjubR/view
 - [피피티]   https://docs.google.com/presentation/d/1sPMh8QSl3j3RIDtYPVW3pot2J7m9zRz-a6_5ZFc1Pqw/edit
