@@ -578,7 +578,7 @@ class RobotDrawerNode(Node):
         acc=None,
         radius=0.0,
         wait_response=False,
-        response_timeout=5.0,
+        response_timeout=None,   # None → 거리/속도 기반 자동 계산
         allow_cancel=True,
     ):
         if self.impact_stop_event.is_set() and self.current_order_id is not None and not self.cancel_recovery_active:
@@ -593,6 +593,19 @@ class RobotDrawerNode(Node):
 
         if acc is None:
             acc = MOVE_ACC
+
+        # ✅ response_timeout 자동 계산: 이전 명령 위치 → 현재 목표 거리 / 속도 + 여유 5초
+        if response_timeout is None:
+            if self.last_commanded_pose is not None:
+                px, py, pz = self.last_commanded_pose[:3]
+                dist_mm = math.sqrt(
+                    (x - px) ** 2 + (y - py) ** 2 + (z - pz) ** 2
+                )
+            else:
+                dist_mm = 500.0  # 초기값: 보수적으로 큰 값
+            # 거리(mm) / 속도(mm/s) + 가속/감속 여유 3초 + 서비스 지연 여유 3초
+            estimated_travel_sec = (dist_mm / max(vel, 1.0)) + 6.0
+            response_timeout = max(10.0, estimated_travel_sec)
 
         if not HAS_DSR_MSGS:
             self.get_logger().info(
@@ -2567,11 +2580,15 @@ class RobotDrawerNode(Node):
 
         self.get_logger().info(f"Starting {color} drawing. Total paths: {len(paths)}")
 
+        total_paths = len(paths)
+
+        # ✅ 시작 시점: currentPath=0으로 초기화
         update_robot_status(
             state="DRAWING",
             stage="DRAW",
             pen=color,
-            totalPath=len(paths)
+            currentPath=0,
+            totalPath=total_paths,
         )
 
         pen_down = False
@@ -2646,6 +2663,15 @@ class RobotDrawerNode(Node):
             ex, ey = path[-1]
             last_draw_point = (ex, ey)
             self.last_draw_point = last_draw_point
+
+            # ✅ 실제 path 그리기 완료 후 currentPath 업데이트 (싱크 맞춤)
+            update_robot_status(
+                state="DRAWING",
+                stage="DRAW",
+                pen=color,
+                currentPath=idx + 1,
+                totalPath=total_paths,
+            )
 
             next_path = None
             if idx + 1 < len(paths):
@@ -2985,7 +3011,6 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
 
 
 
