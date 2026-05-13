@@ -458,6 +458,33 @@ def create_order():
         if not image_saved:
             return jsonify({"error": "Valid image data or an allowed load_img path is required"}), 400
 
+        # ── stroke JSON 저장 ────────────────────────────────────────────────
+        # robot_drawer.py 의 find_stroke_json_path() 가 탐색하는 경로와 일치:
+        #   uploads/{이미지파일명}_strokes.json
+        stroke_json_saved = False
+        stroke_data = data.get("strokeData")
+
+        if (
+            isinstance(stroke_data, dict)
+            and isinstance(stroke_data.get("strokes"), list)
+            and len(stroke_data["strokes"]) > 0
+        ):
+            stroke_json = {
+                "canvasWidth":  stroke_data.get("canvasWidth"),
+                "canvasHeight": stroke_data.get("canvasHeight"),
+                "strokes":      stroke_data["strokes"],
+            }
+            stroke_filename = os.path.splitext(filename)[0] + "_strokes.json"
+            stroke_filepath = os.path.join(UPLOAD_FOLDER, stroke_filename)
+            try:
+                import json as _json
+                with open(stroke_filepath, "w", encoding="utf-8") as f:
+                    _json.dump(stroke_json, f, ensure_ascii=False)
+                stroke_json_saved = True
+            except Exception as json_err:
+                print(f"[Warning] stroke JSON 저장 실패: {json_err}")
+        # ────────────────────────────────────────────────────────────────────
+
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
@@ -485,7 +512,7 @@ def create_order():
             "time": datetime.now().strftime("%H:%M:%S"),
         })
 
-        return jsonify({"success": True, "order_id": order_id})
+        return jsonify({"success": True, "order_id": order_id, "strokeJsonSaved": stroke_json_saved})
     except Exception as e:
         print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
