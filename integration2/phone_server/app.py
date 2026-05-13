@@ -5,6 +5,7 @@ import sqlite3
 import os
 import uuid
 import base64
+import json
 import hashlib
 import secrets
 import shutil
@@ -433,6 +434,7 @@ def create_order():
         case_color = data.get("caseColor", "black")
         total_price = data.get("totalPrice", 35000)
         image_base64 = data.get("imageBase64")
+        stroke_data = data.get("strokeData")
 
         if not image_base64:
             return jsonify({"error": "Image data is required"}), 400
@@ -458,32 +460,16 @@ def create_order():
         if not image_saved:
             return jsonify({"error": "Valid image data or an allowed load_img path is required"}), 400
 
-        # ── stroke JSON 저장 ────────────────────────────────────────────────
-        # robot_drawer.py 의 find_stroke_json_path() 가 탐색하는 경로와 일치:
-        #   uploads/{이미지파일명}_strokes.json
         stroke_json_saved = False
-        stroke_data = data.get("strokeData")
-
-        if (
-            isinstance(stroke_data, dict)
-            and isinstance(stroke_data.get("strokes"), list)
-            and len(stroke_data["strokes"]) > 0
-        ):
-            stroke_json = {
-                "canvasWidth":  stroke_data.get("canvasWidth"),
-                "canvasHeight": stroke_data.get("canvasHeight"),
-                "strokes":      stroke_data["strokes"],
-            }
-            stroke_filename = os.path.splitext(filename)[0] + "_strokes.json"
-            stroke_filepath = os.path.join(UPLOAD_FOLDER, stroke_filename)
-            try:
-                import json as _json
-                with open(stroke_filepath, "w", encoding="utf-8") as f:
-                    _json.dump(stroke_json, f, ensure_ascii=False)
+        stroke_json_file = None
+        if stroke_data and isinstance(stroke_data, dict):
+            strokes = stroke_data.get("strokes")
+            if isinstance(strokes, list) and strokes:
+                stroke_json_file = os.path.splitext(filename)[0] + ".json"
+                stroke_json_path = os.path.join(UPLOAD_FOLDER, stroke_json_file)
+                with open(stroke_json_path, "w", encoding="utf-8") as file_obj:
+                    json.dump(stroke_data, file_obj, ensure_ascii=False)
                 stroke_json_saved = True
-            except Exception as json_err:
-                print(f"[Warning] stroke JSON 저장 실패: {json_err}")
-        # ────────────────────────────────────────────────────────────────────
 
         conn = get_db()
         cursor = conn.cursor()
@@ -512,7 +498,12 @@ def create_order():
             "time": datetime.now().strftime("%H:%M:%S"),
         })
 
-        return jsonify({"success": True, "order_id": order_id, "strokeJsonSaved": stroke_json_saved})
+        return jsonify({
+            "success": True,
+            "order_id": order_id,
+            "strokeJsonSaved": stroke_json_saved,
+            "strokeJsonFile": stroke_json_file,
+        })
     except Exception as e:
         print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -522,14 +513,6 @@ def create_order():
 def get_orders():
     rows = fetch_order_rows()
     return jsonify([serialize_order(row) for row in rows])
-
-
-@app.route("/api/orders/<int:order_id>", methods=["GET"])
-def get_order_detail(order_id):
-    rows = fetch_order_rows("WHERE o.id = ?", (order_id,))
-    if not rows:
-        return jsonify({"error": "Order not found"}), 404
-    return jsonify(serialize_order(rows[0]))
 
 
 @app.route("/api/my/orders", methods=["GET"])
@@ -639,69 +622,6 @@ def reset_order(order_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ==================================================
-# 주문 긴급 중단
-# ==================================================
-@app.route("/api/orders/<int:order_id>/cancel", methods=["PATCH"])
-def cancel_order(order_id):
-
-    try:
-
-        conn = get_db()
-
-        row = conn.execute(
-            "SELECT status FROM orders WHERE id = ?",
-            (order_id,)
-        ).fetchone()
-
-        if not row:
-
-            conn.close()
-
-            return jsonify({
-                "error": "Order not found"
-            }), 404
-
-        current_status = row["status"]
-
-        # 이미 완료된 주문이면 중단 불가
-        if current_status == "done":
-
-            conn.close()
-
-            return jsonify({
-                "error": "Completed order cannot be cancelled"
-            }), 400
-
-        # 중단 요청 상태 변경
-        conn.execute(
-            """
-            UPDATE orders
-            SET status = 'cancel_requested'
-            WHERE id = ?
-            """,
-            (order_id,)
-        )
-
-        conn.commit()
-        conn.close()
-
-        robot_logs.append({
-            "message": f"⛔ Cancel requested for order #{order_id}",
-            "level": "warn",
-            "time": datetime.now().strftime("%H:%M:%S"),
-        })
-
-        return jsonify({
-            "success": True,
-            "status": "cancel_requested"
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "error": str(e)
-        }), 500
 
 @app.route("/api/orders/<int:order_id>", methods=["DELETE"])
 def delete_order(order_id):
