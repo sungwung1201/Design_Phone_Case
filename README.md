@@ -29,6 +29,7 @@ Canvas 드로잉 데이터, 이미지 파일, 주문 상태, 로봇 상태를 �
 13. [향후 개선 방향](#13-향후-개선-방향)
 14. [핵심 기술 스택](#14-참고-핵심-기술-스택)
 15. [팀 작업 타임라인 및 진행 현황](#15-팀-작업-타임라인-및-진행-현황)
+16. [라이선스](#라이선스)
 
 ---
 ## 1) 시스템 설계 / 통신 구조
@@ -180,7 +181,42 @@ MoveLine으로 실제 드로잉
 
 ## 4) 의존성
 
-이 프로젝트는 웹 프론트엔드, Flask 서버, ROS2 로봇 제어 코드로 구성되어 있습니다.
+Flask>=2.3.0
+flask-cors>=4.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+requests>=2.31.0
+Pillow>=10.0.0
+
+### Dependency Notes
+
+#### Python pip dependencies
+
+Install with:
+
+python3 -m pip install -r requirements.txt
+
+#### ROS2 / Robot dependencies
+
+The following packages are NOT installed with pip.
+They must already exist in the ROS2 Humble / Doosan Robotics workspace.
+
+- rclpy
+- std_msgs
+- dsr_msgs2
+
+Recommended environment:
+
+source /opt/ros/humble/setup.bash
+source ~/cobot_ws/install/setup.bash
+
+#### System / runtime
+
+- Ubuntu Linux
+- ROS2 Humble
+- Python 3.10.x
+- Doosan Robotics M0609 ROS2 package
+- SQLite3
 
 ### Python 패키지
 
@@ -561,6 +597,8 @@ robot_status = IMPACT_STOP
 ↓
 중간 개선: HSV Mask, Morphology, Component Filtering, Skeleton, Boundary Centerline
 ↓
+직선/곡선 판별 시도: path 직선성 계산, 곡률 기반 분기, 보간 강도 조정
+↓
 로봇 경로 안정화: Smoothing, Resampling, Path Connect, No-Lift Drawing
 ↓
 최종 구조: Stroke JSON 우선 + OpenCV 이미지 fallback + MoveLine 제어
@@ -940,7 +978,92 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-15. Curve 최소 거리 필터
+### 11-15. 직선 / 곡선 판별 시도
+
+- 목적: 추출된 path가 직선에 가까운지, 곡선에 가까운지 판단해서 서로 다른 방식으로 보정하기 위해 시도
+- 시도 배경:
+  - 모든 path에 같은 보간을 적용하면 직선이 미세하게 흔들려 보일 수 있음
+  - 반대로 보간을 약하게 하면 곡선이 각져 보이거나 끊겨 보일 수 있음
+  - 따라서 직선은 최대한 원본 좌표를 유지하고, 곡선은 보간과 resampling을 더 적극적으로 적용하는 방식을 검토
+- 판별 아이디어:
+  - path의 시작점과 끝점을 하나의 기준 직선으로 설정
+  - path 내부 점들이 기준 직선에서 얼마나 벗어나는지 계산
+  - 점들의 방향 변화량 또는 누적 각도 변화량을 확인
+  - 시작점과 끝점 사이 거리 대비 실제 path 길이가 얼마나 더 긴지 비교
+- 판단 기준 개념:
+  ```text
+  기준 직선에서 벗어난 거리 작음
+  + 전체 방향 변화량 작음
+  + 실제 path 길이와 시작-끝 직선 거리 차이 작음
+  → 직선으로 판단
+
+  기준 직선에서 벗어난 거리 큼
+  또는 방향 변화량 큼
+  또는 실제 path 길이가 시작-끝 거리보다 많이 김
+  → 곡선으로 판단
+  ```
+- 직선으로 판단했을 때 처리:
+  - 과한 spline 보간을 줄임
+  - 시작점과 끝점 방향을 최대한 유지
+  - 불필요한 중간 흔들림을 줄여 직선이 휘어지는 현상 완화
+- 곡선으로 판단했을 때 처리:
+  - Catmull-Rom 보간 적용
+  - 0.2mm resampling으로 점 간격 균일화
+  - 곡선부가 각져 보이지 않도록 path를 부드럽게 보정
+- 장점:
+  - 직선과 곡선을 같은 방식으로 처리했을 때 생기는 품질 차이를 줄일 수 있음
+  - 직선은 직선답게 유지하고, 곡선은 부드럽게 만드는 방향으로 개선 가능
+  - path별 특성에 따라 보정 강도를 다르게 줄 수 있음
+- 문제:
+  - 짧은 path는 직선/곡선 판단 근거가 부족함
+  - 이미지 추출 과정에서 생긴 노이즈 때문에 실제 직선도 곡선처럼 판단될 수 있음
+  - 하나의 path 안에 직선 구간과 곡선 구간이 섞이면 path 단위 판단만으로는 한계가 있음
+  - 기준값이 너무 엄격하면 대부분 곡선으로 분류되고, 너무 느슨하면 실제 곡선도 직선으로 분류됨
+  - 중심선 추출 결과가 흔들리면 직선/곡선 판별도 함께 불안정해짐
+- 결과:
+  - 직선/곡선 분리 처리는 디버깅 과정에서 검토했지만, 최종적으로는 전체 path에 대해 Catmull-Rom 보간, 0.2mm resampling, 1.3mm Path Connect를 적용하는 방식이 더 안정적이라고 판단
+  - 직선/곡선 판별은 향후 품질 개선 방향으로 남김
+- 정리:
+  - 직선/곡선 판별은 그림 품질을 더 높이기 위한 시도였지만, 이미지 기반 path 자체가 흔들리는 상황에서는 분류 정확도보다 전체 path 안정화가 우선이라고 판단했습니다.
+
+---
+
+### 11-16. 직선 / 곡선별 보간 분기 시도
+
+- 목적: 직선으로 판단된 path와 곡선으로 판단된 path에 서로 다른 후처리를 적용하기 위해 검토
+- 처리 방식:
+  ```text
+  path 입력
+  ↓
+  직선성 계산
+  ↓
+  직선 path
+    → 보간 최소화
+    → 점 간격만 정리
+    → MoveLine으로 직선성 유지
+
+  곡선 path
+    → Catmull-Rom 보간
+    → 0.2mm resampling
+    → 부드러운 곡선 path 생성
+  ```
+- 장점:
+  - 직선 path가 spline으로 인해 살짝 휘어지는 문제를 줄일 수 있음
+  - 곡선 path는 부드럽게 보정할 수 있음
+  - path 특성에 따라 후처리 강도를 다르게 줄 수 있음
+- 문제:
+  - 직선과 곡선이 섞인 복합 path는 하나의 class로만 판단하기 어려움
+  - path를 더 작은 segment로 나누면 정확도는 올라가지만 path 개수가 늘어남
+  - path 개수가 늘어나면 펜 Up/Down, MoveLine 명령 수, 작업 시간이 증가할 수 있음
+- 결과:
+  - 최종 로봇 실행에서는 복잡도를 줄이기 위해 단일화된 후처리 구조를 사용
+  - 직선/곡선별 분기는 추후 고도화 항목으로 정리
+- 정리:
+  - 직선과 곡선을 다르게 처리하는 방향은 타당했지만, 실제 로봇 실행 안정성을 위해 최종 단계에서는 단순하고 안정적인 공통 path 처리 방식을 우선했습니다.
+
+---
+
+### 11-17. Curve 최소 거리 필터
 
 - 목적: 너무 가까운 점이 과도하게 많아지는 것을 줄이고 곡선 path를 안정화하기 위해 사용
 - 주요 파라미터:
@@ -959,7 +1082,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-16. Path Resampling
+### 11-18. Path Resampling
 
 - 목적: path의 점 간격을 일정하게 맞춰 로봇이 안정적으로 따라가게 하기 위해 사용
 - 주요 파라미터:
@@ -981,7 +1104,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-17. 최소 Path 길이 필터
+### 11-19. 최소 Path 길이 필터
 
 - 목적: 너무 짧은 path나 노이즈 path를 제거하기 위해 사용
 - 주요 파라미터:
@@ -998,7 +1121,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-18. Path Connect
+### 11-20. Path Connect
 
 - 목적: 이미지 처리 과정에서 여러 조각으로 나뉜 path를 가까운 경우 연결하기 위해 사용
 - 주요 파라미터:
@@ -1027,7 +1150,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-19. Endpoint-to-Path 연결
+### 11-21. Endpoint-to-Path 연결
 
 - 목적: path 끝점이 다른 path의 시작점이 아니라 중간 부분에 가까운 경우도 연결하기 위해 사용
 - 주요 파라미터:
@@ -1044,7 +1167,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-20. No-Lift Drawing
+### 11-22. No-Lift Drawing
 
 - 목적: 가까운 path 사이에서 펜을 들지 않고 이어 그려 선 끊김을 줄이기 위해 사용
 - 주요 파라미터:
@@ -1067,7 +1190,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-21. Nearest Neighbor Path Ordering
+### 11-23. Nearest Neighbor Path Ordering
 
 - 목적: 로봇이 불필요하게 멀리 이동하지 않도록 가까운 path부터 그리기 위해 사용
 - 처리 방식:
@@ -1086,7 +1209,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-22. MoveSplineTask 검토
+### 11-24. MoveSplineTask 검토
 
 - 목적: 여러 점을 한 번에 넘겨 곡선을 부드럽게 그리기 위해 테스트
 - 관련 파라미터:
@@ -1110,7 +1233,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-23. MoveLine 기반 경로 추종
+### 11-25. MoveLine 기반 경로 추종
 
 - 목적: 최종 path를 실제 로봇이 따라가도록 하는 모션 제어 방식
 - 사용 서비스:
@@ -1134,7 +1257,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-24. Line Blend Radius
+### 11-26. Line Blend Radius
 
 - 목적: MoveLine으로 점을 따라갈 때 각 점에서 너무 딱딱하게 멈추지 않고 부드럽게 이어가기 위해 사용
 - 주요 파라미터:
@@ -1152,7 +1275,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-25. Line Point Wait
+### 11-27. Line Point Wait
 
 - 목적: MoveLine 명령을 너무 빠르게 연속 호출해 로봇 컨트롤러나 통신이 불안정해지는 것을 줄이기 위해 사용
 - 주요 파라미터:
@@ -1172,7 +1295,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-26. 펜 Up/Down Z축 제어
+### 11-28. 펜 Up/Down Z축 제어
 
 - 목적: 그릴 때만 펜을 내리고, 이동할 때는 펜을 들어 케이스 긁힘을 방지하기 위해 사용
 - 주요 개념:
@@ -1201,7 +1324,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-27. 속도 / 가속도 분리 제어
+### 11-29. 속도 / 가속도 분리 제어
 
 - 목적: 이동, 하강, 드로잉, 상승 구간의 목적이 다르기 때문에 속도를 분리
 - 처리 방식:
@@ -1225,7 +1348,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-28. 서버 Stroke JSON 저장 로직 수정
+### 11-30. 서버 Stroke JSON 저장 로직 수정
 
 - 목적: 프론트가 보낸 `strokeData`를 실제 로봇이 사용할 수 있도록 서버에 저장
 - 초기 문제:
@@ -1245,7 +1368,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-29. 주문 취소 즉시 정지 로직
+### 11-31. 주문 취소 즉시 정지 로직
 
 - 목적: 작업 중 취소 요청이 들어왔을 때 현재 동작을 최대한 빨리 멈추고 안전하게 복구
 - 초기 문제:
@@ -1271,7 +1394,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-30. 외력 / 충격 정지 감지
+### 11-32. 외력 / 충격 정지 감지
 
 - 목적: 사람이 로봇에 힘을 가하거나 충돌이 발생했을 때 안전 상태를 서버에 반영
 - 처리 방식:
@@ -1294,7 +1417,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-31. 디버그 이미지 저장
+### 11-33. 디버그 이미지 저장
 
 - 목적: 로봇이 이상하게 그렸을 때 어느 단계에서 문제가 생겼는지 확인하기 위해 사용
 - 저장 대상:
@@ -1313,7 +1436,7 @@ robot_status = IMPACT_STOP
 
 ---
 
-### 11-32. 최종 파라미터 정리
+### 11-34. 최종 파라미터 정리
 
 아래 값들은 실제 디버깅 과정에서 선 끊김과 로봇 안정성을 줄이기 위해 조정한 주요 파라미터입니다.
 
@@ -1347,13 +1470,19 @@ PATH_CONNECT_GAP_MM = PATH_CONNECT_HARD_LIMIT_MM
 
 DRAW_MARGIN = 2.0
 DRAW_HOP_OFFSET = 8.0
+
+# 직선/곡선 판별 시도 개념 파라미터
+# 실제 최종 고정 파라미터라기보다 디버깅 과정에서 검토한 기준값 성격
+STRAIGHT_MAX_DEVIATION_MM = 0.5
+STRAIGHT_MAX_TOTAL_ANGLE_DEG = 12.0
+STRAIGHT_LENGTH_RATIO_LIMIT = 1.05
 ```
 
 > 참고: `USE_SPLINE_TASK`는 곡선 테스트 단계에서는 사용을 검토했지만, 최종 로봇 실행 안정성을 위해 MoveLine 기반 제어로 단일화하는 방향이 더 적절합니다.
 
 ---
 
-### 11-33. 최종 결론
+### 11-35. 최종 결론
 
 - Canny Edge는 빠르지만 중심선이 아니라 외곽선을 검출해 제외
 - Contour Direct Path는 외곽선을 따라가 중복 드로잉 문제가 있어 단독 사용 제외
@@ -1361,6 +1490,7 @@ DRAW_HOP_OFFSET = 8.0
 - HSV Mask, Morphology, Connected Component는 이미지 fallback 전처리로 사용
 - Boundary Centerline은 이미지 fallback에서 중복 드로잉을 줄이는 중심 path 방식으로 사용
 - Stroke JSON은 직접 드로잉의 좌표 정보를 살릴 수 있어 최종 1순위 입력으로 사용
+- 직선/곡선 판별을 시도했지만, 실제 이미지 기반 path의 노이즈와 복합 선 구조 때문에 최종에서는 공통 후처리 안정화를 우선
 - Catmull-Rom, 0.2mm Resampling, 1.3mm Path Connect, No-Lift Drawing으로 로봇 path 안정화
 - MoveSplineTask는 안정성 문제로 제외하고 MoveLine 기반 제어로 단일화
 - 주문 취소와 외력 정지는 로봇 안전 복구와 서버 상태 전파까지 포함해 처리
@@ -1372,6 +1502,7 @@ Stroke JSON 존재
 → Stroke 좌표 기반 path 생성
 → Pixel 좌표를 Robot mm 좌표로 변환
 → Safe Area Filtering
+→ 직선/곡선 특성 검토
 → Catmull-Rom Smoothing
 → 0.2mm Resampling
 → 1.3mm Path Connect
@@ -1385,6 +1516,7 @@ Stroke JSON 없음
 → Connected Component
 → Contour / Boundary Centerline
 → Pixel path 생성
+→ 직선/곡선 특성 검토
 → 이후 동일한 후처리 및 MoveLine 실행
 ```
 
