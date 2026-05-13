@@ -1,24 +1,57 @@
+# -*- coding: utf-8 -*-
+# ============================================================
+# robot_drawer.py
+# ------------------------------------------------------------
+# 역할:
+#   1) SQLite orders 테이블에서 waiting 주문을 주기적으로 조회합니다.
+#   2) 주문 이미지와 같은 이름의 stroke JSON 파일을 우선 읽습니다.
+#      예: uploads/abc.png → uploads/abc.json 또는 uploads/abc_strokes.json
+#   3) stroke JSON이 있으면 캔버스 좌표를 로봇 좌표로 변환해서 그립니다.
+#   4) stroke JSON이 없으면 이미지 contour 기반 centerline 경로 추출로 fallback합니다.
+#   5) Doosan M0609 ROS2 서비스(move_line, move_stop, digital output)를 호출해
+#      케이스 픽업 → 케이스 배치 → 펜 픽업 → 드로잉 → 펜 반납 → 완성 케이스 이동을 수행합니다.
+#   6) 작업 상태, 진행률, 로봇 로그를 Flask 서버 관리자 페이지로 전송합니다.
+#
+# 주의:
+#   - 이 파일은 기존 동작 로직을 유지하고, 이해를 돕기 위한 설명 주석을 추가한 버전입니다.
+#   - 실제 로봇 좌표/속도/Z값은 현장 세팅에 맞춰 조정해야 합니다.
+# ============================================================
+
+# ROS2 Python 클라이언트 라이브러리입니다.
+# Node 생성, topic/service 통신, spin 실행에 사용됩니다.
 import rclpy
 from rclpy.node import Node
+
+# 주문 상태 조회/수정용 SQLite, 경로/시간/스레드/수학/JSON 처리용 표준 라이브러리입니다.
 import sqlite3
 import os
 import time
 from pathlib import Path
-import cv2
-import numpy as np
 import threading
 import math
 import json
+
+# 이미지 fallback 경로 추출에 사용하는 OpenCV와 NumPy입니다.
+import cv2
+import numpy as np
+
+# Flask 서버 관리자 페이지에 로그/상태를 보내기 위한 HTTP 요청 라이브러리입니다.
 import requests
 
 
+# 주문 취소 흐름을 일반 예외와 분리하기 위한 사용자 정의 예외입니다.
+# 작업 중 cancel_requested 상태가 감지되면 이 예외를 발생시켜 복구 루틴으로 이동합니다.
 class OrderCancelled(Exception):
     pass
 
 
+# 외력/충돌/Protective Stop 감지 흐름을 일반 예외와 분리하기 위한 사용자 정의 예외입니다.
+# move_line 실패나 RobotState 위험 신호가 감지되면 이 예외를 발생시켜 안전 정지 상태로 전환합니다.
 class ImpactStopped(Exception):
     pass
 
+# Doosan ROS2 서비스 메시지를 불러옵니다.
+# 실제 로봇 환경에서는 dsr_msgs2가 있어야 move_line, gripper I/O, move_stop을 호출할 수 있습니다.
 try:
     from dsr_msgs2.srv import MoveLine, SetCtrlBoxDigitalOutput, MoveStop
     HAS_DSR_MSGS = True
@@ -36,6 +69,7 @@ except ImportError:
         HAS_DSR_MSGS = False
         HAS_MOVE_STOP = False
 
+# RobotState 메시지가 있으면 보호정지/충돌/외력 키워드를 topic으로도 감시합니다.
 try:
     from dsr_msgs2.msg import RobotState
     HAS_DSR_STATE_MSG = True
@@ -47,19 +81,25 @@ except ImportError:
 # ==================================================
 # 濡쒕큸 醫뚰몴 ?ㅼ젙
 # ==================================================
+# ---------------- 로봇 드로잉 가능 영역 좌표 ----------------
+# 실제 케이스 위에 그림을 그릴 수 있는 로봇 좌표 범위입니다.
 ROBOT_MIN_X = 499.116
 ROBOT_MAX_X = 563.307
 ROBOT_MIN_Y = -61.348
 ROBOT_MAX_Y = 49.571
 
+# 로봇 대기 위치입니다. 작업 시작/종료 시 이 위치로 이동합니다.
 ROBOT_HOME_X = 486.372
 ROBOT_HOME_Y = -26.267
 
+# 펜이 종이에 닿는 높이(DRAW_Z)와 안전 이동 높이(SAFE_Z)입니다.
 DRAW_Z = 344.344
 SAFE_Z = 422.344
 
+# 선과 선 사이를 이동할 때 펜을 살짝 들어 올리는 높이 보정값입니다.
 DRAW_HOP_OFFSET = 8.0
 
+# 툴 방향값입니다. move_line의 rx, ry, rz에 사용됩니다.
 TOOL_RX = 19.757
 TOOL_RY = -179.020
 TOOL_RZ = 20.665
@@ -68,12 +108,14 @@ TOOL_RZ = 20.665
 # ==================================================
 # iPhone 15 Plus 耳?댁뒪 ?쒕줈???덉쟾 ?ㅼ젙
 # ==================================================
+# 드로잉 영역 가장자리에서 제외할 여백입니다.
 DRAW_MARGIN = 2.0
 
 
 # ==================================================
 # Z 蹂댁젙 ?ㅼ젙
 # ==================================================
+# 케이스 표면이 완전히 평평하지 않을 때를 대비한 4점 Z 보정값입니다.
 Z_LT = DRAW_Z
 Z_RT = DRAW_Z
 Z_LB = DRAW_Z
@@ -83,6 +125,8 @@ Z_RB = DRAW_Z
 # ==================================================
 # ??醫뚰몴
 # ==================================================
+# ---------------- 펜 거치대 좌표 ----------------
+# 파랑/검정/빨강 펜을 집고 반납할 위치입니다.
 STAND_PICK_BLUE_X = 371.864
 STAND_PICK_BLUE_Y = -63.731
 STAND_PICK_BLUE_Z = 271.854
@@ -108,6 +152,8 @@ STAND_PICK_RED_RZ = 27.580
 # ==================================================
 # ??耳?댁뒪 醫뚰몴
 # ==================================================
+# ---------------- 빈 케이스/완성 케이스 위치 좌표 ----------------
+# 빈 케이스 픽업, 작업대 배치, 완성 케이스 드롭 위치입니다.
 CASE_PICK_X = 499.754
 CASE_PICK_Y = 206.938
 CASE_PICK_Z = 266.801
@@ -154,6 +200,8 @@ CASE_DROP_SAFE_RZ = -137.694
 # ==================================================
 # 援ш컙蹂??띾룄 ?ㅼ젙
 # ==================================================
+# ---------------- 구간별 이동 속도/가속도 ----------------
+# 전체 기본 이동, 케이스 이동, 펜 이동, 드로잉 이동에 각각 다른 속도를 사용합니다.
 MOVE_VEL = 200.0
 MOVE_ACC = 100.0
 
@@ -210,6 +258,8 @@ HOME_RETURN_ACC = 150.0
 # ==================================================
 # ??洹몃━湲??덉쭏 ?ㅼ젙
 # ==================================================
+# ---------------- 드로잉 경로 처리 파라미터 ----------------
+# 선 연결, 경로 샘플링, 짧은 경로 제거 등에 사용하는 값입니다.
 LINE_BLEND_RADIUS = 0.5
 
 LINE_POINT_MIN_WAIT = 0.10
@@ -231,6 +281,8 @@ PATH_CONNECT_GAP_MM = PATH_CONNECT_HARD_LIMIT_MM
 # ==================================================
 # ?붾쾭洹?紐⑤뱶 ?ㅼ젙
 # ==================================================
+# ---------------- 디버그 모드 설정 ----------------
+# 특정 단계/색상/path 수만 실행하고 싶을 때 사용합니다.
 DEBUG_MODE = False
 
 DEBUG_START_STAGE = "PICKUP_PEN"
@@ -254,6 +306,8 @@ STAGE_ORDER = [
 # ==================================================
 # ?뚯씪 諛?DB 寃쎈줈
 # ==================================================
+# ---------------- 파일/DB 경로 ----------------
+# Flask 서버와 같은 폴더 기준으로 database.db와 uploads 폴더를 사용합니다.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, "database.db")
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
@@ -265,6 +319,8 @@ SAVE_DRAW_DEBUG_IMAGES = True
 # 1?쒖쐞: Canvas stroke JSON 吏곸젒 ?ъ슜
 # 2?쒖쐞: ?대?吏 contour 湲곕컲 path 異붿텧
 # ==================================================
+# ---------------- stroke JSON 우선 처리 설정 ----------------
+# JSON 좌표가 있으면 이미지 분석보다 JSON을 우선 사용합니다.
 USE_STROKE_JSON_FIRST = True
 STROKE_JSON_CANDIDATE_SUFFIXES = [".json", "_strokes.json", ".strokes.json"]
 CATMULL_ROM_SAMPLES_PER_SEGMENT = 8
@@ -274,6 +330,7 @@ CONTOUR_APPROX_EPSILON_PX = 0.0
 # ==================================================
 # ?쒕쾭 愿由ъ옄 濡쒓렇 ?꾩넚
 # ==================================================
+# 설명: Flask 관리자 페이지의 /api/robot_logs로 로봇 로그를 전송합니다. 실패해도 로봇 작업은 계속 진행합니다.
 def send_log(msg, level="info"):
     try:
         requests.post(
@@ -290,6 +347,7 @@ def send_log(msg, level="info"):
 # ==================================================
 # ?쒕쾭 愿由ъ옄 ?곹깭 ?꾩넚
 # ==================================================
+# 설명: Flask 관리자 페이지의 /api/robot_status로 현재 로봇 상태, stage, 좌표, 진행률을 전송합니다.
 def update_robot_status(**kwargs):
 
     try:
@@ -304,6 +362,7 @@ def update_robot_status(**kwargs):
         pass
 
 class RobotDrawerNode(Node):
+    # 설명: ROS2 노드를 초기화하고 DB, timer, ROS 서비스 클라이언트, 상태 감시 topic을 준비합니다.
     def __init__(self):
         super().__init__("robot_drawer")
 
@@ -374,6 +433,7 @@ class RobotDrawerNode(Node):
 
         self.move_home_on_startup()
 
+    # 설명: RobotState topic 후보들을 구독해 외력/보호정지 신호를 감시합니다.
     def setup_robot_state_monitor(self):
         topics = [
             "/dsr01/state/robot_state",
@@ -397,6 +457,7 @@ class RobotDrawerNode(Node):
         if not self.robot_state_subscriptions:
             self.get_logger().warn("No robot state subscriptions were created. Impact-stop topic monitoring is unavailable.")
 
+    # 설명: RobotState 메시지 내용을 검사해서 충돌/외력/정지 관련 플래그나 키워드가 있으면 안전정지 처리합니다.
     def on_robot_state_message(self, msg):
         summary = self.describe_robot_state_message(msg)
         lowered = summary.lower()
@@ -436,6 +497,7 @@ class RobotDrawerNode(Node):
             reason_parts.append(summary)
             self.report_impact_stop(" | ".join(reason_parts))
 
+    # 설명: RobotState 메시지에서 의미 있는 필드만 뽑아 로그용 문자열로 만듭니다.
     def describe_robot_state_message(self, msg):
         parts = []
         for attr in (
@@ -467,6 +529,7 @@ class RobotDrawerNode(Node):
 
         return str(msg)
 
+    # 설명: 외력/보호정지 상황을 latch 처리하고 서버 관리자 페이지에 STOPPED/IMPACT_STOP 상태를 알립니다.
     def report_impact_stop(self, reason):
         reason = str(reason).strip() or "unknown reason"
         signature = reason.lower()
@@ -488,6 +551,7 @@ class RobotDrawerNode(Node):
             stopReason=reason[:160],
         )
 
+    # 설명: move_line 응답 내용을 분석해서 success=False 또는 stop 키워드가 있으면 안전정지로 전환합니다.
     def inspect_motion_result_for_stop(self, result, x, y, z):
         try:
             summary = str(result)
@@ -521,6 +585,7 @@ class RobotDrawerNode(Node):
                 f"move_line reported failure near x={x:.3f}, y={y:.3f}, z={z:.3f}: {summary}"
             )
 
+    # 설명: DEBUG_MODE일 때 현재 단계가 실행 범위 안에 있는지 판단합니다.
     def should_run_stage(self, stage_name):
         if not DEBUG_MODE:
             return True
@@ -547,6 +612,7 @@ class RobotDrawerNode(Node):
 
         return start_idx <= current_idx <= end_idx
 
+    # 설명: 추출된 경로 중 실제로 그릴 색상 순서를 결정합니다.
     def get_colors_to_draw(self, color_paths):
         available = [c for c in ["RED", "BLUE", "BLACK"] if color_paths[c]]
 
@@ -566,6 +632,7 @@ class RobotDrawerNode(Node):
         self.get_logger().warn(f"Invalid DEBUG_COLOR setting: {DEBUG_COLOR}")
         return available
 
+    # 설명: Doosan move_line 서비스를 호출해 TCP를 지정 좌표로 이동합니다. 취소/외력 이벤트를 중간에 계속 확인합니다.
     def move_to_pos(
         self,
         x,
@@ -676,6 +743,7 @@ class RobotDrawerNode(Node):
                         raise ImpactStopped(self.current_order_id)
                     raise
 
+    # 설명: 주문 취소나 이상 상황에서 /dsr01/motion/move_stop 서비스를 호출해 즉시 정지를 요청합니다.
     def stop_robot_motion(self):
         if self.motion_stop_requested:
             return
@@ -704,6 +772,7 @@ class RobotDrawerNode(Node):
         except Exception as e:
             self.get_logger().error(f"MoveStop request failed: {e}")
 
+    # 설명: 디지털 출력 1,2번 핀 조합으로 펜/케이스 그리퍼 폭을 제어합니다.
     def control_gripper(self, mode):
         if self.impact_stop_event.is_set() and self.current_order_id is not None and not self.cancel_recovery_active:
             raise ImpactStopped(self.current_order_id)
@@ -747,6 +816,7 @@ class RobotDrawerNode(Node):
         self.get_logger().info(f"Gripper command: {desc} (Pin1:{p1}, Pin2:{p2})")
         self.interruptible_sleep(1.5)
 
+    # 설명: ROBOT_MIN/MAX 좌표에 여백을 적용한 실제 드로잉 가능 영역을 반환합니다.
     def get_draw_area_bounds(self):
         min_x = ROBOT_MIN_X + DRAW_MARGIN
         max_x = ROBOT_MAX_X - DRAW_MARGIN
@@ -754,11 +824,13 @@ class RobotDrawerNode(Node):
         max_y = ROBOT_MAX_Y - DRAW_MARGIN
         return min_x, max_x, min_y, max_y
 
+    # 설명: 로봇 좌표가 드로잉 가능 영역 안에 있는지 검사합니다.
     def is_safe_draw_point(self, x, y):
         min_x, max_x, min_y, max_y = self.get_draw_area_bounds()
 
         return min_x <= x <= max_x and min_y <= y <= max_y
 
+    # 설명: 경로 중 안전 영역 밖으로 나간 구간을 잘라내고 안전한 구간만 남깁니다.
     def split_path_by_safe_area(self, path):
         safe_paths = []
         current_path = []
@@ -776,6 +848,7 @@ class RobotDrawerNode(Node):
 
         return safe_paths
 
+    # 설명: 4점 Z 보정값을 기준으로 현재 x,y 위치의 드로잉 Z 높이를 보간합니다.
     def get_draw_z(self, x, y):
         min_x, max_x, min_y, max_y = self.get_draw_area_bounds()
 
@@ -790,12 +863,15 @@ class RobotDrawerNode(Node):
 
         return z_bottom * (1.0 - ty) + z_top * ty
 
+    # 설명: 현재 위치에서 펜을 들어 올린 이동 높이를 계산합니다.
     def get_draw_hop_z(self, x, y):
         return self.get_draw_z(x, y) + DRAW_HOP_OFFSET
 
+    # 설명: 두 점 사이의 2D 거리(mm)를 계산합니다.
     def distance(self, p1, p2):
         return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
+    # 설명: move_line을 비동기로 보낸 뒤 선분 길이/속도 기준으로 대기할 시간을 계산합니다.
     def calc_line_wait_time(self, p1, p2, vel):
         d = self.distance(p1, p2)
         t = d / max(float(vel), 1.0)
@@ -808,6 +884,7 @@ class RobotDrawerNode(Node):
 
         return t
 
+    # 설명: 경로 전체 길이를 계산합니다.
     def path_length(self, path):
         if len(path) < 2:
             return 0.0
@@ -818,6 +895,7 @@ class RobotDrawerNode(Node):
 
         return total
 
+    # 설명: 너무 짧아서 그릴 필요가 없는 경로를 제거합니다.
     def filter_short_paths(self, paths):
         filtered = []
 
@@ -830,6 +908,7 @@ class RobotDrawerNode(Node):
 
         return filtered
 
+    # 설명: 두 경로가 이어질 수 있을 때 중복점을 피해서 합칩니다.
     def concat_paths(self, path_a, path_b):
         if not path_a:
             return path_b
@@ -842,12 +921,14 @@ class RobotDrawerNode(Node):
 
         return path_a + path_b
 
+    # 설명: 두 경로 사이 간격이 연결 허용 범위인지 판단합니다.
     def can_connect_paths(self, prev_path, next_path, gap):
         if gap >= PATH_CONNECT_HARD_LIMIT_MM:
             return False
 
         return True
 
+    # 설명: 지정한 점과 가장 가까운 경로상의 점 인덱스를 찾습니다.
     def nearest_point_index(self, point, path):
         best_idx = 0
         best_dist = float("inf")
@@ -860,6 +941,7 @@ class RobotDrawerNode(Node):
 
         return best_idx, best_dist
 
+    # 설명: 가까운 중간점에서 후보 경로를 나누어 연결 가능한 부분을 선택합니다.
     def split_candidate_from_index(self, candidate, idx):
         if idx <= 0:
             return list(candidate), []
@@ -883,6 +965,7 @@ class RobotDrawerNode(Node):
 
         return selected, leftovers
 
+    # 설명: 가까운 경로들을 이어서 펜 들기 횟수를 줄입니다.
     def connect_close_paths(self, paths, max_gap=PATH_CONNECT_GAP_MM):
         remaining = [list(path) for path in paths if len(path) >= 2]
         connected_paths = []
@@ -974,6 +1057,7 @@ class RobotDrawerNode(Node):
 
         return connected_paths
 
+    # 설명: 경로 연결 결과가 안정될 때까지 여러 번 연결 최적화를 반복합니다.
     def connect_paths_until_stable(self, paths, max_gap=PATH_CONNECT_GAP_MM, max_passes=5):
         result = [list(path) for path in paths if len(path) >= 2]
 
@@ -987,6 +1071,7 @@ class RobotDrawerNode(Node):
 
         return result
 
+    # 설명: 일정 간격(mm)으로 경로 점을 재샘플링해 로봇 이동을 부드럽게 합니다.
     def resample_path(self, path, step_mm=SPLINE_RESAMPLE_STEP_MM):
         if len(path) < 2:
             return path
@@ -1023,6 +1108,7 @@ class RobotDrawerNode(Node):
 
         return resampled
 
+    # 설명: 재샘플링된 경로 점들을 move_line으로 순서대로 그립니다.
     def draw_path_with_moveline(self, path, order_id=None):
         prev_point = path[0]
 
@@ -1061,6 +1147,7 @@ class RobotDrawerNode(Node):
 
             prev_point = (rx, ry)
 
+    # 설명: 경로를 다시 샘플링한 뒤 실제 드로잉을 수행합니다.
     def draw_path_smooth(self, path, order_id=None):
         if order_id is not None:
             self.ensure_not_cancelled(order_id)
@@ -1068,6 +1155,7 @@ class RobotDrawerNode(Node):
         resampled_path = self.resample_path(path, SPLINE_RESAMPLE_STEP_MM)
         self.draw_path_with_moveline(resampled_path, order_id=order_id)
 
+    # 설명: 빈 케이스를 집는 단계입니다.
     def handle_case_pickup(self):
         self.get_logger().info("Picking up blank case. (CASE_PICKUP)")
 
@@ -1116,6 +1204,7 @@ class RobotDrawerNode(Node):
         self.case_in_gripper = True
         self.case_on_work_area = False
 
+    # 설명: 집은 빈 케이스를 작업대 드로잉 위치에 내려놓는 단계입니다.
     def handle_case_place(self):
         self.get_logger().info("Placing case on work area. (CASE_PLACE)")
 
@@ -1162,6 +1251,7 @@ class RobotDrawerNode(Node):
         self.case_in_gripper = False
         self.case_on_work_area = True
 
+    # 설명: 드로잉이 끝난 케이스를 작업대에서 다시 집는 단계입니다.
     def handle_finished_case_pickup(self):
         self.get_logger().info("Picking up finished case from work area. (FINISHED_CASE_PICKUP)")
 
@@ -1211,6 +1301,7 @@ class RobotDrawerNode(Node):
         self.case_on_work_area = False
 
 
+    # 설명: 취소 복구 중 작업대에 남은 케이스를 다시 집는 단계입니다.
     def handle_cancel_case_pickup(self):
         self.get_logger().info("Picking up case from work area for cancel recovery. (CANCEL_CASE_PICKUP)")
 
@@ -1259,6 +1350,7 @@ class RobotDrawerNode(Node):
         self.case_in_gripper = True
         self.case_on_work_area = False
 
+    # 설명: 완성된 케이스를 배출 위치에 내려놓는 단계입니다.
     def handle_finished_case_drop(self):
         self.get_logger().info("Dropping finished case to output area. (CASE_DROP)")
 
@@ -1305,6 +1397,7 @@ class RobotDrawerNode(Node):
         self.case_in_gripper = False
         self.case_on_work_area = False
 
+    # 설명: 색상별 펜 거치대 좌표를 반환합니다.
     def get_pen_pose(self, color):
         if color == "RED":
             return (
@@ -1335,6 +1428,7 @@ class RobotDrawerNode(Node):
             STAND_PICK_BLACK_RZ,
         )
 
+    # 설명: 지정 색상 펜을 집는 단계입니다.
     def pickup_pen(self, color="BLACK"):
         self.get_logger().info(f"Picking up {color} pen. (PICKUP_PEN)")
 
@@ -1393,6 +1487,7 @@ class RobotDrawerNode(Node):
         self.pen_in_gripper = True
         self.active_pen_color = color
 
+    # 설명: 사용한 펜을 원래 거치대에 반납하는 단계입니다.
     def place_pen(self, color="BLACK"):
         self.get_logger().info(f"Returning {color} pen to its slot. (PLACE_PEN)")
 
@@ -1444,6 +1539,7 @@ class RobotDrawerNode(Node):
         self.pen_is_down = False
         self.active_pen_color = None
 
+    # 설명: 노드 시작 시 로봇을 HOME 위치로 이동시켜 초기 자세를 맞춥니다.
     def move_home_on_startup(self):
         self.get_logger().info("Moving to HOME for initial position setup")
         update_robot_status(
@@ -1464,6 +1560,7 @@ class RobotDrawerNode(Node):
         self.interruptible_sleep(1.0)
         self.get_logger().info("Initial HOME move complete. Starting order monitoring after 1 second.")
 
+    # 설명: DB의 orders.status가 cancel_requested인지 확인합니다.
     def is_cancel_requested(self, order_id):
 
         try:
@@ -1488,6 +1585,7 @@ class RobotDrawerNode(Node):
 
             return False
 
+    # 설명: 작업 중 별도 스레드로 취소 요청을 빠르게 감시합니다.
     def monitor_cancel_request(self, order_id):
         while self.is_drawing and self.current_order_id == order_id and not self.cancel_event.is_set() and not self.impact_stop_event.is_set():
             if self.is_cancel_requested(order_id):
@@ -1497,6 +1595,7 @@ class RobotDrawerNode(Node):
                 return
             time.sleep(0.05)
 
+    # 설명: sleep 중에도 취소/외력 이벤트를 감지할 수 있게 짧게 나누어 대기합니다.
     def interruptible_sleep(self, duration, allow_cancel=True):
         end_time = time.time() + duration
         while time.time() < end_time:
@@ -1507,6 +1606,7 @@ class RobotDrawerNode(Node):
                 raise OrderCancelled(self.current_order_id)
             time.sleep(min(0.02, max(0.0, end_time - time.time())))
 
+    # 설명: 현재 주문이 취소되었거나 외력 정지 상태인지 검사하고 예외를 발생시킵니다.
     def ensure_not_cancelled(self, order_id):
         if self.impact_stop_event.is_set():
             raise ImpactStopped(order_id)
@@ -1517,6 +1617,7 @@ class RobotDrawerNode(Node):
             self.get_logger().warn(f"Order {order_id} cancel requested")
             raise OrderCancelled(order_id)
 
+    # 설명: 주문을 cancelled 상태로 저장하고 관리자 UI 상태를 갱신합니다.
     def mark_order_cancelled(self, order_id):
         try:
             self.cursor.execute(
@@ -1545,6 +1646,7 @@ class RobotDrawerNode(Node):
         )
         self.get_logger().warn(f"Order {order_id} cancelled")
 
+    # 설명: 주문을 impact_stopped 상태로 저장하고 관리자 UI에 안전정지 상태를 표시합니다.
     def mark_order_impact_stopped(self, order_id):
         try:
             self.cursor.execute(
@@ -1575,6 +1677,7 @@ class RobotDrawerNode(Node):
         )
         self.get_logger().error(f"Order {order_id} stopped by external impact or protective stop")
 
+    # 설명: 취소 복구 시 케이스를 공급 위치로 되돌립니다.
     def return_case_to_supply(self):
         self.move_to_pos(
             CASE_PICK_SAFE_X,
@@ -1616,6 +1719,7 @@ class RobotDrawerNode(Node):
         self.case_in_gripper = False
         self.case_on_work_area = False
 
+    # 설명: 작업 취소 후 펜/케이스/로봇 위치를 가능한 안전한 상태로 복구합니다.
     def recover_from_cancel(self, order_id):
         self.get_logger().warn(f"Cancel recovery start for order {order_id}")
         self.cancel_recovery_active = True
@@ -1680,6 +1784,7 @@ class RobotDrawerNode(Node):
         self.last_draw_point = None
         self.cancel_recovery_active = False
 
+    # 설명: 1초마다 DB에서 waiting 주문을 찾고, 새 주문이 있으면 작업 스레드를 시작합니다.
     def poll_database(self):
         if self.is_drawing:
             return
@@ -1748,6 +1853,7 @@ class RobotDrawerNode(Node):
             daemon=True,
         ).start()
 
+    # 설명: 너무 촘촘한 점을 줄여 경로를 간단하게 만듭니다.
     def simplify_and_smooth_path(self, path, min_dist=CURVE_MIN_DIST_MM):
         if not path:
             return []
@@ -1763,6 +1869,7 @@ class RobotDrawerNode(Node):
 
         return simplified
 
+    # 설명: 이미지 mask의 작은 노이즈를 제거하고 연결 요소를 정리합니다.
     def clean_binary_mask(self, mask):
         binary = np.where(mask > 0, 255, 0).astype(np.uint8)
 
@@ -1781,6 +1888,7 @@ class RobotDrawerNode(Node):
 
         return cleaned
 
+    # 설명: HSV 이미지에서 RED/BLUE/BLACK 색상 mask를 생성합니다.
     def create_color_masks(self, hsv):
         mask_red1 = cv2.inRange(
             hsv,
@@ -1817,11 +1925,13 @@ class RobotDrawerNode(Node):
             "BLACK": mask_black,
         }
 
+    # 설명: 로봇 좌표를 디버그 이미지 표시용 픽셀 좌표로 변환합니다.
     def robot_to_pixel(self, x, y, scale, x_offset, y_offset, draw_min_x, draw_max_y):
         px = int(round((x - draw_min_x - x_offset) / scale))
         py = int(round((draw_max_y - y_offset - y) / scale))
         return px, py
 
+    # 설명: mask, centerline, 최종 경로 overlay 이미지를 debug_draw 폴더에 저장합니다.
     def save_draw_debug_images(self, image_path, color_name, mask, centerline_preview, paths, scale, x_offset, y_offset, draw_min_x, draw_max_y):
         if not SAVE_DRAW_DEBUG_IMAGES:
             return
@@ -1885,6 +1995,7 @@ class RobotDrawerNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to save debug image: {e}")
 
+    # 설명: 웹에서 넘어온 색상 문자열/hex 값을 RED/BLUE/BLACK 중 하나로 정규화합니다.
     def normalize_color_name(self, color):
         if color is None:
             return "BLACK"
@@ -1926,6 +2037,7 @@ class RobotDrawerNode(Node):
 
         return "BLACK"
 
+    # 설명: 주문 이미지와 같은 이름의 stroke JSON 후보 파일을 찾습니다.
     def find_stroke_json_path(self, image_path):
         image_path_obj = Path(image_path)
         candidates = []
@@ -1945,6 +2057,7 @@ class RobotDrawerNode(Node):
 
         return None
 
+    # 설명: stroke JSON 파일을 읽고 strokes/paths/data 배열을 반환합니다.
     def read_stroke_json(self, json_path):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
@@ -1968,6 +2081,7 @@ class RobotDrawerNode(Node):
 
         return None
 
+    # 설명: stroke 점 하나를 x,y 숫자 좌표로 파싱합니다.
     def parse_stroke_point(self, point):
         if isinstance(point, dict):
             if "x" in point and "y" in point:
@@ -1981,11 +2095,13 @@ class RobotDrawerNode(Node):
 
         return None
 
+    # 설명: 캔버스 픽셀 좌표를 로봇 드로잉 좌표로 변환합니다.
     def canvas_point_to_robot(self, px, py, scale, x_offset, y_offset, draw_min_x, draw_max_y):
         rx = draw_min_x + x_offset + (px * scale)
         ry = draw_max_y - y_offset - (py * scale)
         return rx, ry
 
+    # 설명: Catmull-Rom spline으로 경로를 부드럽게 보간합니다.
     def catmull_rom_smooth_path(self, path, samples_per_segment=CATMULL_ROM_SAMPLES_PER_SEGMENT):
         if len(path) < 4:
             return list(path)
@@ -2024,6 +2140,7 @@ class RobotDrawerNode(Node):
         result.append(path[-1])
         return result
 
+    # 설명: 현재 위치에서 가까운 path부터 그리도록 경로 순서를 최적화합니다.
     def optimize_paths_order(self, paths):
         paths = [list(path) for path in paths if len(path) >= 2]
         optimized = []
@@ -2058,6 +2175,7 @@ class RobotDrawerNode(Node):
 
         return optimized
 
+    # 설명: 이미지 크기와 로봇 드로잉 영역의 비율을 맞추는 scale/offset을 계산합니다.
     def build_draw_area_transform(self, img_w, img_h):
         draw_min_x, draw_max_x, draw_min_y, draw_max_y = self.get_draw_area_bounds()
         draw_w = draw_max_x - draw_min_x
@@ -2077,6 +2195,7 @@ class RobotDrawerNode(Node):
 
         return scale, x_offset, y_offset, draw_min_x, draw_max_y
 
+    # 설명: stroke JSON을 읽어 색상별 로봇 경로로 변환합니다.
     def extract_strokes_from_json(self, image_path, img_w, img_h, scale, x_offset, y_offset, draw_min_x, draw_max_y):
         json_path = self.find_stroke_json_path(image_path)
 
@@ -2149,12 +2268,14 @@ class RobotDrawerNode(Node):
 
         return color_paths
 
+    # 설명: OpenCV contour를 일반 좌표 리스트로 변환합니다.
     def contour_to_points(self, contour):
         if contour is None or len(contour) < 2:
             return []
 
         return [(float(p[0]), float(p[1])) for p in contour.reshape(-1, 2)]
 
+    # 설명: 픽셀 경로의 길이를 계산합니다.
     def pixel_polyline_length(self, points):
         if len(points) < 2:
             return 0.0
@@ -2165,6 +2286,7 @@ class RobotDrawerNode(Node):
 
         return total
 
+    # 설명: 픽셀 경로를 지정한 점 개수로 균등 재샘플링합니다.
     def resample_pixel_polyline_by_count(self, points, count):
         if len(points) < 2:
             return list(points)
@@ -2211,6 +2333,7 @@ class RobotDrawerNode(Node):
 
         return result
 
+    # 설명: contour에서 가장 멀리 떨어진 두 점을 찾아 open stroke 중심선 계산에 사용합니다.
     def farthest_contour_indices(self, points):
         n = len(points)
 
@@ -2243,6 +2366,7 @@ class RobotDrawerNode(Node):
 
         return best_i, best_j
 
+    # 설명: 닫힌 contour를 두 개의 rail로 나누어 중심선을 계산할 준비를 합니다.
     def split_closed_contour_into_two_rails(self, contour_points, idx_a, idx_b):
         n = len(contour_points)
 
@@ -2261,6 +2385,7 @@ class RobotDrawerNode(Node):
 
         return rail_a, rail_b
 
+    # 설명: 두 경계 rail의 중간점을 연결해 centerline을 만듭니다.
     def build_center_path_from_nearest_boundary_rails(self, outer_rail, inner_rail):
         if len(outer_rail) < 2 or len(inner_rail) < 2:
             return []
@@ -2306,6 +2431,7 @@ class RobotDrawerNode(Node):
 
         return center_path
 
+    # 설명: 더 긴 rail을 outer로 보고 두 rail 사이 중심선을 만듭니다.
     def build_center_path_from_boundary_rails(self, rail_a, rail_b):
         if len(rail_a) < 2 or len(rail_b) < 2:
             return []
@@ -2322,6 +2448,7 @@ class RobotDrawerNode(Node):
 
         return self.build_center_path_from_nearest_boundary_rails(outer_rail, inner_rail)
 
+    # 설명: 두꺼운 열린 선 contour에서 중심선을 추출합니다.
     def build_center_path_from_open_stroke_contour(self, contour):
         contour_points = self.contour_to_points(contour)
 
@@ -2336,6 +2463,7 @@ class RobotDrawerNode(Node):
 
         return self.build_center_path_from_boundary_rails(rail_a, rail_b)
 
+    # 설명: 외곽 contour와 내부 contour 쌍에서 중심선을 추출합니다.
     def build_center_path_from_contour_pair(self, outer_contour, inner_contour):
         outer_points = self.contour_to_points(outer_contour)
         inner_points = self.contour_to_points(inner_contour)
@@ -2376,6 +2504,7 @@ class RobotDrawerNode(Node):
 
         return center_path
 
+    # 설명: mask의 연결 요소 하나를 픽셀 centerline path 목록으로 변환합니다.
     def component_mask_to_center_pixel_paths(self, component_mask):
         contours, hierarchy = cv2.findContours(
             component_mask,
@@ -2437,6 +2566,7 @@ class RobotDrawerNode(Node):
 
         return center_paths
 
+    # 설명: stroke JSON이 없을 때 이미지 mask에서 색상별 centerline 경로를 추출합니다.
     def extract_strokes_from_contours(self, image_path, img, masks, scale, x_offset, y_offset, draw_min_x, draw_max_y):
         color_paths = {"RED": [], "BLUE": [], "BLACK": []}
 
@@ -2522,6 +2652,7 @@ class RobotDrawerNode(Node):
 
         return color_paths
 
+    # 설명: 주문 이미지에서 그릴 경로를 추출합니다. JSON 우선, 없으면 contour fallback입니다.
     def extract_strokes(self, image_path):
         img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
 
@@ -2571,6 +2702,7 @@ class RobotDrawerNode(Node):
             draw_max_y,
         )
 
+    # 설명: 색상 하나의 모든 path를 실제 로봇으로 그리며 진행률을 업데이트합니다.
     def draw_line_paths(self, order_id, color, paths, current_time_spent, total_estimated_time):
         if DEBUG_MODE and DEBUG_MAX_PATHS is not None:
             paths = paths[:DEBUG_MAX_PATHS]
@@ -2742,6 +2874,7 @@ class RobotDrawerNode(Node):
 
         return current_time_spent
 
+    # 설명: 주문 하나의 전체 작업 시나리오를 실행합니다.
     def process_and_draw(self, order_id, image_path):
         cancelled = False
         impact_stopped = False
@@ -2916,6 +3049,7 @@ class RobotDrawerNode(Node):
             self.last_impact_signature = None
             self.is_drawing = False
 
+    # 설명: DB와 Flask API에 주문 진행률과 예상 시간을 반영합니다.
     def update_progress(self, order_id, progress, estimated_time):
         try:
             self.cursor.execute(
@@ -2940,6 +3074,7 @@ class RobotDrawerNode(Node):
         except Exception:
             pass
 
+    # 설명: 예외 발생 시 주문을 error 상태로 저장합니다.
     def mark_order_failed(self, order_id):
         try:
             self.cursor.execute(
@@ -2961,6 +3096,7 @@ class RobotDrawerNode(Node):
 
         self.get_logger().error(f"Order {order_id} marked as failed")
 
+    # 설명: 모든 작업 완료 후 주문을 done 상태로 저장합니다.
     def complete_order(self, order_id):
         self.update_progress(order_id, 100, 0)
 
@@ -2992,6 +3128,7 @@ class RobotDrawerNode(Node):
     
 
 
+# 설명: ROS2 노드를 생성하고 spin을 시작하는 진입점입니다.
 def main(args=None):
     rclpy.init(args=args)
 
@@ -3011,6 +3148,5 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
 
 
