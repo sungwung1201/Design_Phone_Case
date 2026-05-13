@@ -497,6 +497,14 @@ def get_orders():
     return jsonify([serialize_order(row) for row in rows])
 
 
+@app.route("/api/orders/<int:order_id>", methods=["GET"])
+def get_order_detail(order_id):
+    rows = fetch_order_rows("WHERE o.id = ?", (order_id,))
+    if not rows:
+        return jsonify({"error": "Order not found"}), 404
+    return jsonify(serialize_order(rows[0]))
+
+
 @app.route("/api/my/orders", methods=["GET"])
 @login_required
 def get_my_orders():
