@@ -1,91 +1,232 @@
 /**
  * sendOrder
  *
- * canvas 위에 그린 stroke 데이터를 imageBase64와 함께 서버로 전송합니다.
- * 서버는 strokeData를 {이미지파일명}_strokes.json 으로 저장하고,
- * robot_drawer.py 가 해당 파일을 읽어 실제 로봇 경로로 변환합니다.
- *
- * strokeData 형식:
- *   {
- *     canvasWidth:  <number>,   // 캔버스 픽셀 너비
- *     canvasHeight: <number>,   // 캔버스 픽셀 높이
- *     strokes: [                // 사용자가 그린 선 배열
- *       [
- *         { x: <number>, y: <number> },  // 각 점의 좌표
- *         ...
- *       ],
- *       ...
- *     ]
- *   }
- *
- * strokes 가 없거나 비어있으면 strokeData 는 null 로 전송됩니다.
- * 서버는 strokeData 가 null 이면 JSON 파일을 생성하지 않고,
- * 로봇은 이미지 contour 기반 fallback 으로 동작합니다.
+ * 클라이언트 캔버스 이미지(imageBase64)와 stroke JSON을 함께 서버로 전송합니다.
+ * - strokes가 [[{x,y}], ...] 형태여도 전송
+ * - strokes가 [{color, points:[{x,y}]}] 형태여도 전송
+ * - 모바일/다른 PC에서 접속해도 localhost 대신 현재 접속한 서버 IP의 5000번 포트로 전송
+ * - 로그인 토큰이 localStorage에 있으면 Authorization 헤더도 같이 전송
  */
-const sendOrder = async ({
-  model       = "iphone14",
-  caseType    = "hard",
-  caseColor   = "black",
-  totalPrice  = 12000,
-  canvas      = null,   // HTMLCanvasElement
-  strokes     = null,   // 2D 배열: [[{x,y}, ...], ...]  ← app 에서 관리하는 stroke 상태
-} = {}) => {
 
-  // ── 1. 이미지 base64 추출 ────────────────────────────────────────────────
-  if (!canvas) {
-    throw new Error("canvas element is required");
+function getApiBase() {
+  if (window.ROBOCASE_API_BASE) {
+    return window.ROBOCASE_API_BASE.replace(/\/$/, '');
   }
-  const imageBase64 = canvas.toDataURL("image/png");
 
-  // ── 2. strokeData 구성 ──────────────────────────────────────────────────
-  // strokes 배열이 실제로 점을 가진 선을 하나 이상 포함할 때만 전송합니다.
-  let strokeData = null;
-  const hasStrokes =
-    Array.isArray(strokes) &&
-    strokes.length > 0 &&
-    strokes.some((stroke) => Array.isArray(stroke) && stroke.length > 0);
+  const saved = localStorage.getItem('ROBOCASE_API_BASE');
+  if (saved) {
+    return saved.replace(/\/$/, '');
+  }
 
-  if (hasStrokes) {
-    strokeData = {
-      canvasWidth:  canvas.width,
-      canvasHeight: canvas.height,
-      strokes:      strokes,   // [[{x,y}, ...], ...]
+  const { protocol, hostname, port } = window.location;
+
+  // Flask에서 같은 포트(5000)로 페이지를 열었으면 상대경로 사용
+  if (hostname && port === '5000') {
+    return '';
+  }
+
+  // Vite/정적서버/모바일에서 열었으면 같은 IP의 Flask 5000번으로 전송
+  if (hostname) {
+    return `${protocol}//${hostname}:5000`;
+  }
+
+  // file:// 로 직접 연 경우
+  return 'http://127.0.0.1:5000';
+}
+
+function getStoredToken() {
+  return (
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('token') ||
+    localStorage.getItem('accessToken') ||
+    localStorage.getItem('robocase_token') ||
+    ''
+  );
+}
+
+function normalizePoint(point) {
+  if (!point) return null;
+
+  if (Array.isArray(point) && point.length >= 2) {
+    const x = Number(point[0]);
+    const y = Number(point[1]);
+
+    return Number.isFinite(x) && Number.isFinite(y)
+      ? { x, y }
+      : null;
+  }
+
+  if (typeof point === 'object') {
+    const x = Number(
+      point.x ??
+      point.px ??
+      point.offsetX ??
+      point.clientX ??
+      point.cx
+    );
+
+    const y = Number(
+      point.y ??
+      point.py ??
+      point.offsetY ??
+      point.clientY ??
+      point.cy
+    );
+
+    return Number.isFinite(x) && Number.isFinite(y)
+      ? { x, y }
+      : null;
+  }
+
+  return null;
+}
+
+function normalizeStroke(stroke) {
+  if (!stroke) return null;
+
+  // [[{x,y}, {x,y}], ...] 안의 한 stroke
+  if (Array.isArray(stroke)) {
+    const points = stroke
+      .map(normalizePoint)
+      .filter(Boolean);
+
+    return points.length >= 2
+      ? {
+          color: '#000000',
+          points,
+        }
+      : null;
+  }
+
+  // [{ color, points:[...] }] 형태
+  // 또는 { strokeStyle, path:[...] } 형태
+  if (typeof stroke === 'object') {
+    const rawPoints =
+      stroke.points ||
+      stroke.path ||
+      stroke.coords ||
+      stroke.data ||
+      [];
+
+    if (!Array.isArray(rawPoints)) {
+      return null;
+    }
+
+    const points = rawPoints
+      .map(normalizePoint)
+      .filter(Boolean);
+
+    if (points.length < 2) {
+      return null;
+    }
+
+    return {
+      color:
+        stroke.color ||
+        stroke.strokeStyle ||
+        stroke.strokeColor ||
+        stroke.pen ||
+        '#000000',
+      points,
     };
   }
 
-  // ── 3. 서버로 전송 ────────────────────────────────────────────────────────
+  return null;
+}
+
+function buildStrokeData(strokes, canvas) {
+  if (!Array.isArray(strokes)) {
+    return null;
+  }
+
+  const normalized = strokes
+    .map(normalizeStroke)
+    .filter(Boolean);
+
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  return {
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height,
+    strokes: normalized,
+  };
+}
+
+const sendOrder = async ({
+  model = 'iPhone 15 Plus',
+  caseType = 'clear',
+  caseColor = 'black',
+  totalPrice = 35000,
+  canvas = null,
+  strokes = null,
+} = {}) => {
+  if (!canvas) {
+    throw new Error('canvas element is required');
+  }
+
+  const imageBase64 = canvas.toDataURL('image/png');
+
+  const strokeData = buildStrokeData(strokes, canvas);
+
   const payload = {
     model,
     caseType,
     caseColor,
     totalPrice,
     imageBase64,
-    strokeData,   // null 또는 { canvasWidth, canvasHeight, strokes }
+    strokeData,
   };
 
-  const res = await fetch("http://localhost:5000/api/orders", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+  console.log('[sendOrder] 전송 payload:', {
+    model,
+    caseType,
+    caseColor,
+    totalPrice,
+    imageBase64Length: imageBase64.length,
+    strokeCount: strokeData?.strokes?.length || 0,
+    apiBase: getApiBase() || '(same-origin)',
+  });
+
+  const token = getStoredToken();
+
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${getApiBase()}/api/orders`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
     body: JSON.stringify(payload),
   });
 
+  const data = await res.json().catch(() => ({}));
+
   if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    throw new Error(errBody.error || `Server error: ${res.status}`);
+    console.error('[sendOrder] 서버 오류:', res.status, data);
+    throw new Error(data.error || `Server error: ${res.status}`);
   }
 
-  const data = await res.json();
-  console.log("[sendOrder] 서버 응답:", data);
+  console.log('[sendOrder] 서버 응답:', data);
 
-  // data.strokeJsonSaved === true  → 로봇이 JSON 경로로 동작
-  // data.strokeJsonSaved === false → 로봇이 이미지 contour fallback 으로 동작
   if (data.strokeJsonSaved) {
-    console.log("[sendOrder] stroke JSON 저장 완료 → 로봇이 stroke JSON 경로로 동작합니다.");
+    console.log(
+      `[sendOrder] stroke JSON 저장 완료: ${data.strokeJsonFile}, strokes=${data.strokeCount}`
+    );
   } else {
-    console.log("[sendOrder] stroke 데이터 없음 → 로봇이 이미지 contour fallback 으로 동작합니다.");
+    console.warn(
+      '[sendOrder] stroke JSON 저장 안 됨. strokes 배열 전달 여부를 확인하세요.'
+    );
   }
 
-  return data;   // { success, order_id, strokeJsonSaved }
+  return data;
 };
+
+// 전역에서 호출할 수 있게 노출
+window.sendOrder = sendOrder;
