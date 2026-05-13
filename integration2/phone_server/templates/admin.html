@@ -102,7 +102,7 @@
     .order-meta { color:#888; font-size:12px; margin-top:2px; }
     .progress-wrap { display:flex; align-items:center; gap:8px; margin-top:6px; }
     .prog-bg { flex:1; height:5px; background:#2a2f3d; border-radius:3px; overflow:hidden; }
-    .prog-fill { height:100%; border-radius:3px; transition:width .5s ease; background:#4ea1ff; }
+    .prog-fill { height:100%; border-radius:3px; transition:width 1.2s cubic-bezier(0.4, 0, 0.2, 1); background:#4ea1ff; }
     .prog-fill.done { background:#00ff88; }
     .prog-pct { font-size:11px; color:#888; min-width:28px; text-align:right; font-family:monospace; }
     .badge {
@@ -250,6 +250,55 @@
       transform:scale(1.08);
       box-shadow:0 0 12px rgba(255,255,255,.2);
     }
+
+    .order-detail-overlay {
+      position:fixed; inset:0;
+      background:rgba(0,0,0,.7);
+      display:none; align-items:center; justify-content:center;
+      z-index:99998; backdrop-filter:blur(4px);
+    }
+    .order-detail-overlay.show { display:flex; }
+    .order-detail-box {
+      width:560px; max-width:92%; max-height:88vh;
+      background:#171d29; border:1px solid #2a2f3d;
+      border-radius:20px; overflow-y:auto;
+      padding:28px 28px 24px;
+    }
+    .order-detail-header {
+      display:flex; justify-content:space-between;
+      align-items:center; margin-bottom:20px;
+    }
+    .order-detail-title { font-size:18px; font-weight:800; }
+    .order-detail-close {
+      font-size:28px; cursor:pointer; color:#888;
+      line-height:1; background:none; border:none;
+    }
+    .order-detail-close:hover { color:white; }
+    .detail-img {
+      width:100%; max-height:220px; object-fit:contain;
+      border-radius:12px; background:#fff; margin-bottom:18px;
+    }
+    .detail-grid {
+      display:grid; grid-template-columns:1fr 1fr; gap:10px;
+      margin-bottom:18px;
+    }
+    .detail-item {
+      background:#1a1f2e; border-radius:10px; padding:12px 14px;
+    }
+    .detail-label { font-size:11px; color:#666; margin-bottom:4px; }
+    .detail-value { font-size:14px; font-weight:600; }
+
+    /* ── USER FILTER TABS ── */
+    .user-tabs {
+      display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;
+    }
+    .user-tab {
+      background:#1d2330; border:1px solid #2a2f3d;
+      color:#aaa; padding:6px 14px; border-radius:99px;
+      cursor:pointer; font-size:12px; transition:.2s;
+    }
+    .user-tab:hover { border-color:#4ea1ff; color:#4ea1ff; }
+    .user-tab.active { background:#4ea1ff; border-color:#4ea1ff; color:#000; font-weight:700; }
   </style>
 </head>
 <body>
@@ -409,29 +458,25 @@
             Path 진행률
           </div>
 
-          <div class="progress-wrap"
-              style="margin-top:18px;">
+          <div class="progress-wrap" style="margin-top:18px;">
 
             <div class="prog-bg">
-
               <div class="prog-fill"
                   id="robot-progress-bar"
                   style="width:0%">
               </div>
-
             </div>
+
+            <span class="prog-pct" id="robot-progress-pct">0%</span>
 
           </div>
 
           <div style="
-            margin-top:12px;
-            color:#888;
-            font-size:13px;
-          "
-              id="robot-progress-text">
-
-            0 / 0 paths
-
+            margin-top:8px;
+            color:#666;
+            font-size:11px;
+          " id="robot-progress-text">
+            계산 중...
           </div>
 
         </div>
@@ -468,7 +513,12 @@
 
     <!-- 주문 패널 -->
     <div class="orders-panel" id="page-orders">
-      <div style="font-weight:700; font-size:15px; margin-bottom:4px;">📦 주문 목록</div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <div style="font-weight:700; font-size:15px;">📦 주문 목록</div>
+      </div>
+      <div class="user-tabs" id="user-tabs">
+        <button class="user-tab active" onclick="filterByUser('all', this)">전체</button>
+      </div>
       <div id="orders-list"><div style="color:#555;text-align:center;padding:2rem;">불러오는 중...</div></div>
     </div>
 
@@ -513,7 +563,7 @@
      onclick="closeImageModal()">
 
   <div class="image-modal-close">
-    ×
+    
   </div>
 
   <img id="modal-image"
@@ -522,8 +572,62 @@
 
 </div>
 
+<div class="order-detail-overlay" id="order-detail-overlay" onclick="closeOrderDetail()">
+  <div class="order-detail-box" onclick="event.stopPropagation()">
+    <div class="order-detail-header">
+      <div class="order-detail-title" id="detail-title">주문 상세</div>
+      <button class="order-detail-close" onclick="closeOrderDetail()">×</button>
+    </div>
+    <img id="detail-img" class="detail-img" src="" style="display:none">
+    <div class="detail-grid">
+      <div class="detail-item">
+        <div class="detail-label">주문 번호</div>
+        <div class="detail-value" id="detail-id">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">상태</div>
+        <div class="detail-value" id="detail-status">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">주문자</div>
+        <div class="detail-value" id="detail-user">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">주문일시</div>
+        <div class="detail-value" id="detail-date">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">기종</div>
+        <div class="detail-value" id="detail-model">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">케이스</div>
+        <div class="detail-value" id="detail-case">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">색상</div>
+        <div class="detail-value" id="detail-color">-</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">결제금액</div>
+        <div class="detail-value" id="detail-price">-</div>
+      </div>
+    </div>
+    <div class="detail-item" style="margin-bottom:10px;">
+      <div class="detail-label">진행률</div>
+      <div class="progress-wrap" style="margin-top:8px;">
+        <div class="prog-bg">
+          <div class="prog-fill" id="detail-prog-bar" style="width:0%"></div>
+        </div>
+        <span class="prog-pct" id="detail-prog-pct">0%</span>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 let allOrders = [];
+let filteredUserId = 'all';
 let flaskLogs = [];
 let robotLogs = [];
 let currentPage = 'dashboard';
@@ -890,20 +994,64 @@ async function fetchRobotLogs() {
     el.innerHTML = logs.map(log => {
 
       let cls = 'log-info';
+      let icon = '●';
+      let badge = '';
 
       if (log.level === 'warn') {
         cls = 'log-warn';
-      }
-
-      if (log.level === 'error') {
+        icon = '▲';
+        badge = `<span style="
+          background:rgba(255,204,0,.18);
+          color:#ffcc00;
+          font-size:10px;
+          font-weight:700;
+          padding:1px 6px;
+          border-radius:4px;
+          margin-right:6px;
+          letter-spacing:.5px;
+        ">WARN</span>`;
+      } else if (log.level === 'error') {
         cls = 'log-error';
+        icon = '✕';
+        badge = `<span style="
+          background:rgba(255,92,92,.18);
+          color:#ff5c5c;
+          font-size:10px;
+          font-weight:700;
+          padding:1px 6px;
+          border-radius:4px;
+          margin-right:6px;
+          letter-spacing:.5px;
+        ">ERROR</span>`;
+      } else {
+        badge = `<span style="
+          background:rgba(0,204,102,.12);
+          color:#00cc66;
+          font-size:10px;
+          font-weight:700;
+          padding:1px 6px;
+          border-radius:4px;
+          margin-right:6px;
+          letter-spacing:.5px;
+        ">INFO</span>`;
       }
 
-      return `
-<span class="${cls}">[${log.time}] ${log.message}</span>
-`;
+      return `<span class="${cls}" style="
+        display:flex;
+        align-items:baseline;
+        gap:6px;
+        padding:4px 6px;
+        border-radius:6px;
+        margin-bottom:2px;
+        background:rgba(255,255,255,.03);
+        border-left:2px solid currentColor;
+      ">
+        <span style="color:#444;font-size:11px;min-width:70px;">${log.time}</span>
+        ${badge}
+        <span style="flex:1;">${log.message}</span>
+      </span>`;
 
-    }).join('\n');
+    }).join('');
 
     el.scrollTop = el.scrollHeight;
 
@@ -975,11 +1123,15 @@ async function fetchRobotStatus() {
       pct = (current / total) * 100;
     }
 
-    document.getElementById('robot-progress-bar')
-      .style.width = `${pct}%`;
+    const bar = document.getElementById('robot-progress-bar');
+    bar.style.width = `${pct.toFixed(1)}%`;
+    bar.className = `prog-fill${pct >= 100 ? ' done' : ''}`;
+
+    document.getElementById('robot-progress-pct')
+      .textContent = `${Math.round(pct)}%`;
 
     document.getElementById('robot-progress-text')
-      .textContent = `${current} / ${total} paths`;
+      .textContent = total > 0 ? `${current} / ${total} paths` : '대기 중...';
 
     const stopReason = String(data.stopReason || '').trim();
     const stopKey = `${data.orderId || '-'}:${data.stage || '-'}:${stopReason}`;
@@ -1006,13 +1158,48 @@ async function fetchRobotStatus() {
 }
 
 // ─── 주문 패널 렌더링 ───
+// ─── 사용자 탭 생성 ───
+function buildUserTabs() {
+  const tabs = document.getElementById('user-tabs');
+  if (!tabs) return;
+
+  const users = {};
+  allOrders.forEach(o => {
+    if (o.userId && o.userEmail) users[o.userId] = o.userEmail;
+  });
+
+  const existing = [...tabs.querySelectorAll('.user-tab[data-uid]')].map(b => b.dataset.uid);
+  Object.entries(users).forEach(([uid, email]) => {
+    if (existing.includes(String(uid))) return;
+    const btn = document.createElement('button');
+    btn.className = 'user-tab';
+    btn.dataset.uid = uid;
+    btn.textContent = email;
+    btn.onclick = () => filterByUser(uid, btn);
+    tabs.appendChild(btn);
+  });
+}
+
+function filterByUser(uid, btn) {
+  filteredUserId = uid;
+  document.querySelectorAll('.user-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderOrders();
+}
+
 function renderOrders() {
+
+  buildUserTabs();
 
   const el = document.getElementById('orders-list');
 
   if (!el) return;
 
-  if (!allOrders.length) {
+  const displayOrders = filteredUserId === 'all'
+    ? allOrders
+    : allOrders.filter(o => String(o.userId) === String(filteredUserId));
+
+  if (!displayOrders.length) {
 
     el.innerHTML = `
 <div style="
@@ -1027,7 +1214,7 @@ function renderOrders() {
     return;
   }
 
-  el.innerHTML = allOrders.map(o => {
+  el.innerHTML = displayOrders.map(o => {
 
     const status = getEffectiveOrderStatus(o);
     const isDone = status === 'done';
@@ -1116,6 +1303,13 @@ function renderOrders() {
   </span>
 
   <button class="btn-rst"
+          onclick="openOrderDetail(${o.id})"
+          style="border-color:#4ea1ff;"
+          title="상세보기">
+    🔍
+  </button>
+
+  <button class="btn-rst"
           onclick="resetOrder(${o.id})">
     🔄
   </button>
@@ -1183,6 +1377,58 @@ async function deleteOrder(id) {
   );
 
   fetchOrders();
+}
+
+// ─── 주문 상세 모달 ───
+async function openOrderDetail(id) {
+  try {
+    const res = await fetch(`/api/orders/${id}`);
+    if (!res.ok) throw new Error();
+    const o = await res.json();
+
+    const statusLabel = {
+      waiting:          '대기',
+      processing:       '진행 중',
+      cancel_requested: '취소 요청',
+      cancelled:        '중단',
+      impact_stopped:   '외력 중단',
+      safety_stopped:   '안전 중단',
+      error:            '오류',
+      done:             '완료'
+    }[o.status] || o.status;
+
+    document.getElementById('detail-title').textContent  = `주문 #${o.id} 상세`;
+    document.getElementById('detail-id').textContent     = `#${o.id}`;
+    document.getElementById('detail-status').textContent = statusLabel;
+    document.getElementById('detail-user').textContent   = o.userEmail || '비회원';
+    document.getElementById('detail-date').textContent   = fullTime(o.createdAt);
+    document.getElementById('detail-model').textContent  = o.model || '-';
+    document.getElementById('detail-case').textContent   = o.caseType || '-';
+    document.getElementById('detail-color').textContent  = o.caseColor || '-';
+    document.getElementById('detail-price').textContent  = `₩${(o.totalPrice||0).toLocaleString()}`;
+
+    const pct = o.progress || 0;
+    const bar = document.getElementById('detail-prog-bar');
+    bar.style.width = `${pct}%`;
+    bar.className   = `prog-fill ${pct >= 100 ? 'done' : ''}`;
+    document.getElementById('detail-prog-pct').textContent = `${pct}%`;
+
+    const img = document.getElementById('detail-img');
+    if (o.image_path) {
+      img.src           = `/uploads/${o.image_path}`;
+      img.style.display = 'block';
+    } else {
+      img.style.display = 'none';
+    }
+
+    document.getElementById('order-detail-overlay').classList.add('show');
+  } catch(e) {
+    showToast('주문 정보를 불러올 수 없습니다.', 'err');
+  }
+}
+
+function closeOrderDetail() {
+  document.getElementById('order-detail-overlay').classList.remove('show');
 }
 
 // ─── 토스트 ───
@@ -1279,7 +1525,7 @@ window.onload = () => {
 
   setInterval(fetchRobotLogs, 1000);
 
-  setInterval(fetchRobotStatus, 500);
+  setInterval(fetchRobotStatus, 1500);
 
   setInterval(() => {
 
